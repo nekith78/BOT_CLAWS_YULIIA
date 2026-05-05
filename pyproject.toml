@@ -7,7 +7,9 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.12"
+# Min 3.10 for PEP 604 (X | Y union), match statement, structural type alias.
+# Prod runs on 3.12 (see Dockerfile); local dev on 3.10 is supported.
+python = "^3.10"
 
 # Telegram bot
 aiogram = "^3.13"
@@ -57,7 +59,7 @@ addopts = "-ra -q --strict-markers"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "RUF"]
@@ -67,7 +69,7 @@ ignore = ["S101"]  # assert в тестах
 "tests/**" = ["S"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.10"
 strict = true
 warn_unused_ignores = true
 warn_return_any = true
