@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.storage.models import Appointment
@@ -114,6 +114,37 @@ class AppointmentRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars())
+
+    async def list_for_client(
+        self,
+        client_id: int,
+        *,
+        statuses: tuple[str, ...] = ("scheduled", "done", "cancelled"),
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Appointment]:
+        """All appointments for a client, newest first. Optional date window."""
+        stmt = select(Appointment).where(
+            Appointment.client_id == client_id,
+            Appointment.status.in_(statuses),
+        )
+        if start is not None:
+            stmt = stmt.where(Appointment.starts_at >= start)
+        if end is not None:
+            stmt = stmt.where(Appointment.starts_at < end)
+        stmt = stmt.order_by(desc(Appointment.starts_at))
+        result = await self._session.execute(stmt)
+        return list(result.scalars())
+
+    async def update_visit_note(
+        self, appointment_id: int, text: str
+    ) -> Appointment | None:
+        appt = await self.get(appointment_id)
+        if appt is None:
+            return None
+        appt.visit_note = text
+        await self._session.flush()
+        return appt
 
     async def delete(self, appointment_id: int) -> bool:
         appt = await self.get(appointment_id)

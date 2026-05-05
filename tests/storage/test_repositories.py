@@ -156,6 +156,56 @@ async def test_list_in_range(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_for_client_returns_newest_first(session: AsyncSession) -> None:
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    a = await clients.create(name="A")
+    b = await clients.create(name="B")
+    await appts.create(client_id=a.id, starts_at=_utc(2026, 5, 6, 10))
+    await appts.create(client_id=a.id, starts_at=_utc(2026, 5, 8, 14))
+    await appts.create(client_id=b.id, starts_at=_utc(2026, 5, 6, 11))
+
+    result = await appts.list_for_client(a.id)
+    assert [appt.starts_at for appt in result] == [
+        _utc(2026, 5, 8, 14),
+        _utc(2026, 5, 6, 10),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_for_client_filters_by_window(session: AsyncSession) -> None:
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 1, 10))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 6, 14))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 10, 9))
+
+    result = await appts.list_for_client(
+        client.id, start=_utc(2026, 5, 5, 0), end=_utc(2026, 5, 9, 0)
+    )
+    assert [appt.starts_at for appt in result] == [_utc(2026, 5, 6, 14)]
+
+
+@pytest.mark.asyncio
+async def test_update_visit_note(session: AsyncSession) -> None:
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+    appt = await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 6, 10))
+    updated = await appts.update_visit_note(appt.id, "новая заметка")
+    assert updated is not None
+    assert updated.visit_note == "новая заметка"
+    assert (await appts.get(appt.id)).visit_note == "новая заметка"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_update_visit_note_returns_none_for_missing(session: AsyncSession) -> None:
+    appts = AppointmentRepository(session)
+    assert await appts.update_visit_note(9999, "x") is None
+
+
+@pytest.mark.asyncio
 async def test_notify_rule_create_and_list_enabled(session: AsyncSession) -> None:
     repo = NotifyRuleRepository(session)
     await repo.create(kind="time_day_before", value="20:00", enabled=True)
