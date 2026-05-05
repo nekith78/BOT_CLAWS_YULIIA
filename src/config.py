@@ -54,7 +54,7 @@ class Settings(BaseSettings):
         return f"sqlite+aiosqlite:///{self.db_path}"
 
     @model_validator(mode="after")
-    def _validate_provider_keys(self) -> "Settings":
+    def _validate_provider_keys(self) -> Settings:
         if self.stt_provider == "openai" and not self.openai_api_key:
             raise ValueError("STT_PROVIDER=openai requires OPENAI_API_KEY")
         if self.stt_provider == "yandex" and not (
