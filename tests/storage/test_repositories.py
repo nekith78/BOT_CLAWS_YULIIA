@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
 from src.storage.repositories.notify_rules import NotifyRuleRepository
+from src.storage.repositories.settings import SettingRepository
 
 
 @pytest.mark.asyncio
@@ -191,3 +192,35 @@ async def test_notify_rule_replace_all(session: AsyncSession) -> None:
     all_rules = await repo.list_all()
     assert len(all_rules) == 2
     assert {r.kind for r in all_rules} == {"time_day_before", "time_same_day"}
+
+
+@pytest.mark.asyncio
+async def test_setting_get_returns_none_when_missing(session: AsyncSession) -> None:
+    repo = SettingRepository(session)
+    assert await repo.get("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_setting_set_then_get(session: AsyncSession) -> None:
+    repo = SettingRepository(session)
+    await repo.set("timezone", "Asia/Almaty")
+
+    val = await repo.get("timezone")
+    assert val == "Asia/Almaty"
+
+
+@pytest.mark.asyncio
+async def test_setting_set_overwrites(session: AsyncSession) -> None:
+    repo = SettingRepository(session)
+    await repo.set("preset", "eve_morning")
+    await repo.set("preset", "eve_only")
+
+    assert await repo.get("preset") == "eve_only"
+
+
+@pytest.mark.asyncio
+async def test_setting_get_int(session: AsyncSession) -> None:
+    repo = SettingRepository(session)
+    await repo.set("default_duration_min", "60")
+    assert await repo.get_int("default_duration_min") == 60
+    assert await repo.get_int("missing", default=15) == 15
