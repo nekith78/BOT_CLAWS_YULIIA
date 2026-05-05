@@ -19,6 +19,7 @@ def test_add_appointment_states() -> None:
     assert AddAppointment.entering_time.state == "AddAppointment:entering_time"
     assert AddAppointment.entering_note.state == "AddAppointment:entering_note"
     assert AddAppointment.confirming.state == "AddAppointment:confirming"
+    assert AddAppointment.resolving_conflict.state == "AddAppointment:resolving_conflict"
 
 
 def test_edit_appointment_states() -> None:

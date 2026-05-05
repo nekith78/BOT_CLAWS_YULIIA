@@ -19,7 +19,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.handlers.add_appointment import entry, on_save, router
+from src.bot.handlers.add_appointment import entry, on_force_save, on_save, router
 from src.bot.states import AddAppointment
 from src.services import settings_service
 from src.storage.repositories.appointments import AppointmentRepository
@@ -110,6 +110,96 @@ async def test_on_save_creates_appointment_in_utc(
     )
     assert appts[0].starts_at == expected_utc
     assert await state.get_state() is None  # finalize cleared state
+
+
+async def test_on_save_with_overlap_routes_to_conflict_state(
+    state: FSMContext,
+    bot: MagicMock,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Готовим клиента + существующую запись на 14:00 локали (= 09:00 UTC).
+    expected_utc = (
+        datetime(2026, 5, 6, 14, 0, tzinfo=ZoneInfo("Asia/Almaty"))
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+    async with session_factory() as session:
+        await settings_service.seed_defaults(session)
+        client = await ClientRepository(session).create(name="Олег")
+        await session.flush()
+        await AppointmentRepository(session).create(
+            client_id=client.id, starts_at=expected_utc, duration_min=60
+        )
+        await session.commit()
+        client_id = client.id
+
+    await state.set_state(AddAppointment.confirming)
+    await state.update_data(
+        client_id=client_id,
+        picked_date="2026-05-06",
+        picked_time="14:30",  # пересекается с 14:00..15:00
+        flow_message_id=555,
+    )
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.message = MagicMock(chat=MagicMock(id=100))
+    cb.answer = AsyncMock()
+    await on_save(cb, state=state, bot=bot, session_factory=session_factory)
+
+    assert await state.get_state() == AddAppointment.resolving_conflict.state
+    edit_args = bot.edit_message_text.await_args.kwargs
+    assert "уже есть записи" in edit_args["text"]
+    assert "Олег" in edit_args["text"]
+
+    # Counts должны быть прежним: новой записи ещё не появилось.
+    async with session_factory() as session:
+        appts = await AppointmentRepository(session).list_in_range(
+            start=datetime(2026, 5, 6, 0, 0),
+            end=datetime(2026, 5, 7, 0, 0),
+        )
+    assert len(appts) == 1
+
+
+async def test_on_force_save_writes_second_appointment(
+    state: FSMContext,
+    bot: MagicMock,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    expected_utc = (
+        datetime(2026, 5, 6, 14, 0, tzinfo=ZoneInfo("Asia/Almaty"))
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+    async with session_factory() as session:
+        await settings_service.seed_defaults(session)
+        client = await ClientRepository(session).create(name="Олег")
+        await session.flush()
+        await AppointmentRepository(session).create(
+            client_id=client.id, starts_at=expected_utc, duration_min=60
+        )
+        await session.commit()
+        client_id = client.id
+
+    await state.set_state(AddAppointment.resolving_conflict)
+    await state.update_data(
+        client_id=client_id,
+        picked_date="2026-05-06",
+        picked_time="14:30",
+        flow_message_id=555,
+    )
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.message = MagicMock(chat=MagicMock(id=100))
+    cb.answer = AsyncMock()
+    await on_force_save(cb, state=state, bot=bot, session_factory=session_factory)
+
+    async with session_factory() as session:
+        appts = await AppointmentRepository(session).list_in_range(
+            start=datetime(2026, 5, 6, 0, 0),
+            end=datetime(2026, 5, 7, 0, 0),
+        )
+    assert len(appts) == 2
+    assert await state.get_state() is None
 
 
 @pytest_asyncio.fixture

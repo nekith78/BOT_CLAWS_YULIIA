@@ -16,6 +16,7 @@ class AddAppointment(StatesGroup):
     entering_time = State()
     entering_note = State()
     confirming = State()
+    resolving_conflict = State()
 
 
 class EditAppointment(StatesGroup):

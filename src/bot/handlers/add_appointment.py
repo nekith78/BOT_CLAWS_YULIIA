@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -445,29 +446,134 @@ async def on_save(
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    state_data = await state.get_data()
-    async with session_scope(factory) as session:
-        tz = await settings_service.get_timezone(session)
-        duration = await settings_service.get_default_duration_min(session)
-
-    picked_date = date.fromisoformat(state_data["picked_date"])
-    hh, mm = state_data["picked_time"].split(":")
-    local_dt = datetime.combine(picked_date, time(int(hh), int(mm)), tzinfo=tz)
-    starts_at_utc = local_dt.astimezone(timezone.utc).replace(tzinfo=None)
-
     chat_id = callback.message.chat.id
+    state_data = await state.get_data()
+    starts_at_utc, duration, tz = await _resolve_starts_at(factory, state_data)
+
     async with session_scope(factory) as session:
         repo = AppointmentRepository(session)
-        # Conflict-check (Task 9c will surface this in UI; for now just save).
+        overlap = await repo.find_overlap(starts_at=starts_at_utc, duration_min=duration)
+        if overlap:
+            client_repo = ClientRepository(session)
+            lines: list[str] = []
+            for appt in overlap:
+                conflict_client = await client_repo.get(appt.client_id)
+                if conflict_client is None:
+                    continue
+                local_starts = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(tz)
+                local_ends = (
+                    appt.starts_at + timedelta(minutes=appt.duration_min)
+                ).replace(tzinfo=timezone.utc).astimezone(tz)
+                lines.append(
+                    f"• {conflict_client.name}, "
+                    f"{local_starts.strftime('%H:%M')}–{local_ends.strftime('%H:%M')}"
+                )
+            await advance(
+                bot,
+                chat_id=chat_id,
+                state=state,
+                text="⚠️ В это время уже есть записи:\n" + "\n".join(lines)
+                + "\n\nЗаписать всё равно?",
+                reply_markup=_conflict_kb(),
+            )
+            await state.set_state(AddAppointment.resolving_conflict)
+            await callback.answer()
+            return
+
         await repo.create(
             client_id=state_data["client_id"],
             starts_at=starts_at_utc,
             duration_min=duration,
             visit_note=state_data.get("visit_note"),
         )
-    await finalize(
-        bot, chat_id=chat_id, state=state, text="✅ Запись сохранена."
+    await finalize(bot, chat_id=chat_id, state=state, text="✅ Запись сохранена.")
+    await callback.answer()
+
+
+async def _resolve_starts_at(
+    factory: async_sessionmaker[Any], state_data: dict[str, Any]
+) -> tuple[datetime, int, ZoneInfo]:
+    """Combine state's picked_date + picked_time in OWNER_TZ, return (UTC naive, duration, tz)."""
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+        duration = await settings_service.get_default_duration_min(session)
+    picked_date = date.fromisoformat(state_data["picked_date"])
+    hh, mm = state_data["picked_time"].split(":")
+    local_dt = datetime.combine(picked_date, time(int(hh), int(mm)), tzinfo=tz)
+    starts_at_utc = local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return starts_at_utc, duration, tz
+
+
+def _conflict_kb() -> Any:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Записать", callback_data=WizardCD(action="save").pack()
+                ),
+                InlineKeyboardButton(
+                    text="Изменить время", callback_data=WizardCD(action="back").pack()
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена", callback_data=WizardCD(action="cancel").pack()
+                )
+            ],
+        ]
     )
+
+
+@router.callback_query(AddAppointment.resolving_conflict, WizardCD.filter(F.action == "save"))
+async def on_force_save(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    chat_id = callback.message.chat.id
+    state_data = await state.get_data()
+    starts_at_utc, duration, _ = await _resolve_starts_at(factory, state_data)
+    async with session_scope(factory) as session:
+        await AppointmentRepository(session).create(
+            client_id=state_data["client_id"],
+            starts_at=starts_at_utc,
+            duration_min=duration,
+            visit_note=state_data.get("visit_note"),
+        )
+    await finalize(bot, chat_id=chat_id, state=state, text="✅ Запись сохранена (с пересечением).")
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.resolving_conflict, WizardCD.filter(F.action == "back"))
+async def on_change_time(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text="Выбери другое время:",
+        reply_markup=time_picker_kb(),
+    )
+    await state.set_state(AddAppointment.choosing_time)
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.resolving_conflict, WizardCD.filter(F.action == "cancel"))
+async def on_conflict_cancel(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    await cancel(bot, chat_id=callback.message.chat.id, state=state)
     await callback.answer()
 
 
