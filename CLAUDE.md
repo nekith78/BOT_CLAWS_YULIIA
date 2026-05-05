@@ -1,8 +1,9 @@
-# Claude rules for BOT_CLAWS_YULIIA
+# CLAUDE.md
 
-This file is read by Claude Code at the start of every session in this repo.
-It defines project-specific rules. Global rules (`~/.claude/CLAUDE.md`) and
-user instructions take precedence over this file.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Global rules (`~/.claude/CLAUDE.md`) and user instructions take precedence over
+anything below.
 
 ---
 
@@ -61,6 +62,114 @@ exists, don't repeat unless the user asks again.
 ```
 
 После прохождения walkthrough — следующий вопрос пользователя обрабатывать как обычно.
+
+---
+
+## Common commands
+
+Run from repo root. The local virtualenv is `.venv/` (`virtualenvs.in-project = true`).
+
+```bash
+# Install / update dependencies
+poetry install
+
+# Tests
+poetry run pytest -v                                          # full suite (39 passing)
+poetry run pytest tests/storage/test_repositories.py -v       # single file
+poetry run pytest tests/storage/test_repositories.py::TestClientRepository::test_create_client -v   # single test
+poetry run pytest -k whitelist                                # filter by keyword
+poetry run pytest --cov=src --cov-report=term-missing         # with coverage
+
+# Lint + type check (must be clean before commit)
+poetry run ruff check src tests
+poetry run ruff check --fix src tests        # autofix
+poetry run mypy src                          # strict mode (see pyproject.toml)
+
+# Alembic (migrations live in src/storage/migrations/versions)
+mkdir -p data
+DB_PATH="$(pwd)/data/bot.db" poetry run alembic upgrade head
+DB_PATH="$(pwd)/data/bot.db" poetry run alembic revision --autogenerate -m "<desc>"
+DB_PATH="$(pwd)/data/bot.db" poetry run alembic downgrade -1
+
+# Run the bot — needs Redis, easiest path is docker compose
+docker compose up --build                    # builds image, applies migrations, starts polling
+docker compose logs -f bot                   # tail bot logs
+docker compose down                          # stop (data/ + redis-data/ persist on disk)
+```
+
+There is **no** `make` / `npm` / unified task runner — invoke `poetry run` directly.
+
+---
+
+## Architecture
+
+Three-layer design with a strict dependency direction (`bot → services → storage`).
+Cross-layer imports going the other way are forbidden.
+
+### `src/bot/` — presentation (aiogram 3)
+Handlers, keyboards, FSM states, middlewares. Knows about Telegram primitives
+(`Message`, `CallbackQuery`, `FSMContext`); does **not** import SQLAlchemy directly.
+Routers are wired in `src/main.py` → `_build_dispatcher`. The
+`WhitelistMiddleware` is registered as **`outer_middleware` before any router**,
+so unauthorised updates are dropped before any handler logic — silently, by
+design (no reply to non-owner). It walks every payload type in `aiogram.types.Update`
+to find a `from_user.id` and compares to `OWNER_CHAT_ID`.
+
+### `src/services/` — domain logic
+No aiogram imports. Each module exposes async functions that take an
+`AsyncSession` and return plain values or ORM instances. Example:
+`settings_service.seed_defaults(session)` is idempotent and called once at
+startup. Future skeletons live in `services/parser/`, `services/voice/`,
+`services/notifications/` (Plans #2–#5).
+
+### `src/storage/` — persistence (SQLAlchemy 2.0 async)
+- `models.py` — five tables: `settings`, `clients`, `appointments`,
+  `notify_rules`, `scheduled_jobs`. Models are **dumb schema only**; no methods,
+  no validation, no business logic.
+- `repositories/` — one repository per model
+  (`settings.py`, `clients.py`, `appointments.py`, `notify_rules.py`).
+  Repositories take an `AsyncSession` in `__init__` and own all queries.
+  Service-layer code goes through repositories, never raw `select()`.
+- `db.py` — `create_engine`, `create_session_factory`, and `session_scope`
+  (async context manager: commit on success, rollback on exception). Thin
+  plumbing — no business logic.
+- `migrations/` — Alembic. `env.py` reads `DB_PATH` from the environment and
+  binds to `Base.metadata`. Migrations run in the docker-compose entrypoint
+  (`alembic upgrade head && python -m src.main`), **not** inside `main.py`.
+
+### Bootstrap (`src/main.py`)
+Strict order: load settings → configure logging → ensure data dir → seed
+defaults (opens its own short-lived engine and disposes it) → build dispatcher
+with Redis FSM storage (TTL = `FSM_TTL_MINUTES`) + whitelist + routers →
+`start_polling`. Migrations are not run here.
+
+### Config (`src/config.py`)
+`pydantic-settings` `Settings` class — single source of truth for env vars.
+The `model_validator` enforces that the chosen `STT_PROVIDER` has its required
+keys (so the bot fails fast on bad `.env`), and that an LLM key is available
+(`LLM_API_KEY` falls back to `OPENAI_API_KEY` via `effective_llm_key`). **Do
+not read env vars directly anywhere else** — accept a `Settings` (or specific
+fields) as an argument.
+
+### State / persistence
+- **SQLite** (`/data/bot.db` in container, `./data/bot.db` locally) — domain
+  data. Mounted as a volume in docker-compose so it survives rebuilds.
+- **Redis 7** — aiogram FSM storage only. Configured with AOF + a snapshot
+  every 60s so an in-progress wizard survives a restart. URL is
+  `redis://redis:6379/0` inside compose, override `REDIS_URL` for local dev.
+
+### Tests
+- `pytest-asyncio` in `auto` mode (configured in `pyproject.toml`); no need
+  for `@pytest.mark.asyncio` decorators.
+- `tests/conftest.py` provides two fixtures used everywhere:
+  `engine` (in-memory SQLite + `Base.metadata.create_all`) and `session`
+  (an `AsyncSession` against that engine).
+- A module-level `event.listens_for(Engine, "connect")` hook in `conftest.py`
+  enables `PRAGMA foreign_keys=ON` for **every** SQLite connection opened during
+  tests. If you build an engine outside the fixtures, FK enforcement is on too —
+  rely on cascade deletes accordingly.
+- Tests for the bot layer exercise middleware/router objects directly; they do
+  not open a real Telegram connection.
 
 ---
 
