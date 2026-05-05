@@ -71,7 +71,7 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 
 
 def ensure_data_dir(settings: Settings) -> None:
