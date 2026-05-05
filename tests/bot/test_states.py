@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from src.bot.states import AddAppointment, EditAppointment, EditClient, HistoryFilter
+from src.bot.states import (
+    AddAppointment,
+    BrowseClients,
+    EditAppointment,
+    EditClient,
+    HistoryFilter,
+)
 
 
 def test_add_appointment_states() -> None:
@@ -36,3 +42,7 @@ def test_edit_client_states() -> None:
 
 def test_history_filter_states() -> None:
     assert HistoryFilter.entering_date.state == "HistoryFilter:entering_date"
+
+
+def test_browse_clients_states() -> None:
+    assert BrowseClients.searching.state == "BrowseClients:searching"

@@ -33,3 +33,7 @@ class EditClient(StatesGroup):
 
 class HistoryFilter(StatesGroup):
     entering_date = State()
+
+
+class BrowseClients(StatesGroup):
+    searching = State()
