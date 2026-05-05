@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
+from src.storage.repositories.notify_rules import NotifyRuleRepository
 
 
 @pytest.mark.asyncio
@@ -151,3 +152,42 @@ async def test_list_in_range(session: AsyncSession) -> None:
         start=_utc(2026, 5, 6, 0), end=_utc(2026, 5, 7, 0)
     )
     assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_notify_rule_create_and_list_enabled(session: AsyncSession) -> None:
+    repo = NotifyRuleRepository(session)
+    await repo.create(kind="time_day_before", value="20:00", enabled=True)
+    await repo.create(kind="time_same_day", value="09:00", enabled=True)
+    await repo.create(kind="offset_before", value="60m", enabled=False)
+
+    enabled = await repo.list_enabled()
+    assert len(enabled) == 2
+    kinds = {r.kind for r in enabled}
+    assert kinds == {"time_day_before", "time_same_day"}
+
+
+@pytest.mark.asyncio
+async def test_notify_rule_toggle(session: AsyncSession) -> None:
+    repo = NotifyRuleRepository(session)
+    rule = await repo.create(kind="offset_before", value="60m", enabled=False)
+
+    toggled = await repo.set_enabled(rule.id, True)
+    assert toggled is not None
+    assert toggled.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_notify_rule_replace_all(session: AsyncSession) -> None:
+    repo = NotifyRuleRepository(session)
+    await repo.create(kind="offset_before", value="60m")
+    await repo.create(kind="offset_before", value="24h")
+
+    await repo.replace_all([
+        ("time_day_before", "20:00", True),
+        ("time_same_day", "09:00", True),
+    ])
+
+    all_rules = await repo.list_all()
+    assert len(all_rules) == 2
+    assert {r.kind for r in all_rules} == {"time_day_before", "time_same_day"}
