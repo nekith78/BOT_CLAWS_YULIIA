@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -62,4 +62,42 @@ class Appointment(Base):
     __table_args__ = (
         Index("idx_appt_starts_status", "starts_at", "status"),
         Index("idx_appt_client", "client_id"),
+    )
+
+
+class NotifyRule(Base):
+    """Правило уведомлений (UI-настраиваемое).
+
+    kind: time_day_before | time_same_day | offset_before
+    value: для time_* — "HH:MM"; для offset_before — "60m" / "24h" / "2d"
+    """
+
+    __tablename__ = "notify_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    value: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=func.now())
+
+
+class ScheduledJob(Base):
+    """Запланированный пуш. Сохраняется в БД, чтобы переживать рестарты."""
+
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    appointment_id: Mapped[int] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False
+    )
+    rule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notify_rules.id", ondelete="SET NULL"), nullable=True
+    )
+    fire_at: Mapped[datetime] = mapped_column(nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index("idx_jobs_fire_sent", "fire_at", "sent_at"),
     )
