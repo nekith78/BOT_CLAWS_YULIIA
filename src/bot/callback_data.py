@@ -44,3 +44,10 @@ class PeriodCD(CallbackData, prefix="period", sep="|"):
 class WizardCD(CallbackData, prefix="wiz", sep="|"):
     v: int = 1
     action: Literal["save", "edit", "cancel", "skip", "back"]
+
+
+class DateShortcutCD(CallbackData, prefix="dateshort", sep="|"):
+    """Date-step shortcuts on the AddAppointment FSM screen."""
+
+    v: int = 1
+    action: Literal["today", "tomorrow", "day_after", "open_calendar", "text_input"]

@@ -10,6 +10,7 @@ from src.bot.keyboards.appointment_card import appointment_card_kb
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.client_picker import client_picker_kb
 from src.bot.keyboards.confirm import confirm_kb
+from src.bot.keyboards.date_shortcut import date_shortcut_kb
 from src.bot.keyboards.main_menu import main_menu_kb
 from src.bot.keyboards.period_picker import period_picker_kb
 from src.bot.keyboards.time_picker import time_picker_kb
@@ -131,3 +132,10 @@ class TestAppointmentCardKb:
                 assert b.callback_data is not None
                 assert b.callback_data.startswith("appt|")
                 assert b.callback_data.endswith("|42")
+
+
+class TestDateShortcutKb:
+    def test_all_buttons_present(self) -> None:
+        kb = date_shortcut_kb()
+        texts = {b.text for row in kb.inline_keyboard for b in row}
+        assert {"Сегодня", "Завтра", "Послезавтра", "📅 Календарь", "⌨️ Текстом"} == texts

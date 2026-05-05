@@ -3,7 +3,15 @@ from __future__ import annotations
 
 import pytest
 
-from src.bot.callback_data import ApptCD, CalendarCD, ClientCD, PeriodCD, TimeCD, WizardCD
+from src.bot.callback_data import (
+    ApptCD,
+    CalendarCD,
+    ClientCD,
+    DateShortcutCD,
+    PeriodCD,
+    TimeCD,
+    WizardCD,
+)
 
 
 class TestApptCD:
@@ -55,3 +63,12 @@ class TestWizardCD:
     def test_action_only(self) -> None:
         cd = WizardCD(action="cancel")
         assert WizardCD.unpack(cd.pack()).action == "cancel"
+
+
+class TestDateShortcutCD:
+    @pytest.mark.parametrize(
+        "action", ["today", "tomorrow", "day_after", "open_calendar", "text_input"]
+    )
+    def test_round_trip(self, action: str) -> None:
+        cd = DateShortcutCD(action=action)  # type: ignore[arg-type]
+        assert DateShortcutCD.unpack(cd.pack()) == cd
