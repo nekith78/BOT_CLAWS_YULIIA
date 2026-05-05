@@ -25,10 +25,9 @@ if config.config_file_name is not None:
 db_path = os.environ.get("DB_PATH", "/data/bot.db")
 config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 
-# Импортируется по мере добавления моделей в этапе 3:
-# from src.storage.models import Base
-# target_metadata = Base.metadata
-target_metadata = None
+from src.storage.models import Base  # noqa: E402
+
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
