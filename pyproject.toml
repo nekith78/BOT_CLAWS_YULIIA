@@ -38,6 +38,7 @@ structlog = "^24.4"
 
 # Time zones (zoneinfo built-in for py3.12, но Windows нужен tzdata)
 tzdata = "^2024.2"
+greenlet = "^3.5.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
