@@ -1,0 +1,75 @@
+[tool.poetry]
+name = "bot-claws-yuliia"
+version = "0.1.0"
+description = "Personal Telegram bot for managing client appointments with voice input"
+authors = ["Yuliia <owner@local>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+# Telegram bot
+aiogram = "^3.13"
+
+# Storage
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.36"}
+aiosqlite = "^0.20"
+alembic = "^1.14"
+
+# FSM storage
+redis = "^5.2"
+
+# Scheduling
+apscheduler = "^3.10"
+
+# Config
+pydantic = "^2.10"
+pydantic-settings = "^2.6"
+
+# HTTP / API clients
+httpx = "^0.28"
+openai = "^1.55"
+
+# Logging
+structlog = "^24.4"
+
+# Time zones (zoneinfo built-in for py3.12, но Windows нужен tzdata)
+tzdata = "^2024.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-asyncio = "^0.24"
+pytest-cov = "^6.0"
+ruff = "^0.8"
+mypy = "^1.13"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# ----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "RUF"]
+ignore = ["S101"]  # assert в тестах
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]

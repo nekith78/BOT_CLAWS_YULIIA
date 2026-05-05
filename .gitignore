@@ -1,0 +1,60 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Database (содержит данные клиентов!)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+
+# Redis dumps
+dump.rdb
+appendonly.aof
+*.aof
+*.rdb
+
+# Logs (могут содержать chat_id и фрагменты сообщений)
+logs/
+*.log
+*.log.*
+
+# Voice cache
+voice_cache/
+audio_temp/
+*.ogg.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Alembic локальные временные
+alembic.ini.local
