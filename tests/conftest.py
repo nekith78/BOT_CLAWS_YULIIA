@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest_asyncio
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -13,10 +15,19 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_conn, _connection_record) -> None:  # type: ignore[no-untyped-def]
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     # Lazy import: src.storage.models is added in Task 3.
-    # Importing at module-level would break pytest collection until Task 3 lands.
+    # Now that models exist, this could be hoisted to module-level — left lazy for safety.
     from src.storage.models import Base
 
     eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)

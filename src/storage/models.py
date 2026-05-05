@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Index, String, Text, func
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -41,4 +41,25 @@ class Client(Base):
 
     __table_args__ = (
         Index("idx_clients_name_lower", func.lower(name)),
+    )
+
+
+class Appointment(Base):
+    """Один визит. Длительность по умолчанию 60 мин — для проверки конфликтов."""
+
+    __tablename__ = "appointments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    starts_at: Mapped[datetime] = mapped_column(nullable=False)
+    duration_min: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    visit_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="scheduled")
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=func.now())
+
+    __table_args__ = (
+        Index("idx_appt_starts_status", "starts_at", "status"),
+        Index("idx_appt_client", "client_id"),
     )
