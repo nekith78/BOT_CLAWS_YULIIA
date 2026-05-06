@@ -1,4 +1,4 @@
-"""OpenRouter LLM provider for intent parsing.
+"""OpenRouter LLM provider for intent parsing + key-quota helper.
 
 OpenRouter is a model-aggregator with an OpenAI-compatible Chat Completions
 endpoint and a real free tier (no profile-completion gating). We reuse the
@@ -22,6 +22,8 @@ import json
 import logging
 from datetime import datetime
 from typing import Any
+
+import httpx
 
 from src.services.intent.types import ParsedIntent, ToolSpec
 
@@ -134,3 +136,19 @@ class OpenRouterLLM:
                 attempts += 1
         assert last_exc is not None
         raise last_exc
+
+
+async def fetch_quota(api_key: str) -> dict[str, Any]:
+    """Hit OpenRouter's GET /api/v1/auth/key for credit usage + free-tier
+    status. Used by the /quota bot command. Raises httpx errors on
+    network / auth failure — caller decides how to surface them.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    data = payload.get("data") or {}
+    return data if isinstance(data, dict) else {}

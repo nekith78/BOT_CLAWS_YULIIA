@@ -47,6 +47,9 @@ from src.bot.handlers import (
     notify_settings as notify_settings_handlers,
 )
 from src.bot.handlers import (
+    quota as quota_handlers,
+)
+from src.bot.handlers import (
     start as start_handlers,
 )
 from src.bot.handlers import (
@@ -117,6 +120,7 @@ def _build_dispatcher(
     # Order matters: system has the highest priority so /cancel always wins.
     # Intake is registered LAST so reserved reply-text-buttons keep their handlers.
     dp.include_router(system_handlers.router)
+    dp.include_router(quota_handlers.router)  # /quota slash command
     dp.include_router(start_handlers.router)
     dp.include_router(add_appt_handlers.router)
     dp.include_router(text_add_handlers.router)
