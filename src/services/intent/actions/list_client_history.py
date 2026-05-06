@@ -91,26 +91,39 @@ class ListClientHistoryAction:
 
         lines = [header, ""]
         rows: list[list[InlineKeyboardButton]] = []
+        snapshot_items: list[dict[str, Any]] = []
         # list_for_client returns newest first — keep that order for «история».
         for appt in appts:
             label = format_appointment_line(appt, client, tz=ctx.tz)
-            local_date = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(ctx.tz)
-            lines.append(f"{format_date_ru(local_date)} · {label}")
+            local_dt = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(ctx.tz)
+            lines.append(f"{format_date_ru(local_dt)} · {label}")
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=f"{format_date_ru(local_date)} · {label}",
+                        text=f"{format_date_ru(local_dt)} · {label}",
                         callback_data=ApptCD(
                             action="view", appointment_id=appt.id
                         ).pack(),
                     )
                 ]
             )
+            snapshot_items.append(
+                {
+                    "client_name": client.name,
+                    "date": local_dt.date().isoformat(),
+                    "time": local_dt.strftime("%H:%M"),
+                    "note": appt.visit_note,
+                }
+            )
 
         return ActionResponse(
             result=ActionResult.EXECUTED,
             text="\n".join(lines),
             keyboard=InlineKeyboardMarkup(inline_keyboard=rows),
+            context_snapshot={
+                "client_name": client.name,
+                "appointments": snapshot_items,
+            },
         )
 
     async def execute(

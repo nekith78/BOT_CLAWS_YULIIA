@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -79,11 +80,14 @@ class ListAppointmentsAction:
                     text="Не разобрал дату. Формат: YYYY-MM-DD.",
                 )
 
-        text, keyboard = await _build_payload(
+        text, keyboard, snapshot = await _build_payload(
             ctx, period=period, anchor=anchor
         )
         return ActionResponse(
-            result=ActionResult.EXECUTED, text=text, keyboard=keyboard
+            result=ActionResult.EXECUTED,
+            text=text,
+            keyboard=keyboard,
+            context_snapshot=snapshot,
         )
 
     async def execute(
@@ -95,7 +99,7 @@ class ListAppointmentsAction:
 
 async def _build_payload(
     ctx: ActionContext, *, period: str, anchor: date | None
-) -> tuple[str, InlineKeyboardMarkup | None]:
+) -> tuple[str, InlineKeyboardMarkup | None, dict[str, Any] | None]:
     today_local = ctx.now_utc.replace(tzinfo=timezone.utc).astimezone(ctx.tz).date()
 
     start_local: datetime | None = None
@@ -155,7 +159,9 @@ async def _build_payload(
         )
     )
     if not pairs:
-        return f"{header}\n\nЗаписей нет.", None
+        return f"{header}\n\nЗаписей нет.", None, None
+
+    snapshot = _build_context_snapshot(pairs, tz=ctx.tz)
 
     rows: list[list[InlineKeyboardButton]] = []
     if period in {"today", "tomorrow", "date"}:
@@ -170,7 +176,7 @@ async def _build_payload(
                     )
                 ]
             )
-        return header, InlineKeyboardMarkup(inline_keyboard=rows)
+        return header, InlineKeyboardMarkup(inline_keyboard=rows), snapshot
 
     # Multi-day grouping (week/month/all).
     grouped = group_by_day(pairs, tz=ctx.tz)
@@ -191,7 +197,32 @@ async def _build_payload(
                 ]
             )
         lines.append("")
-    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
+    return (
+        "\n".join(lines).rstrip(),
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        snapshot,
+    )
+
+
+def _build_context_snapshot(
+    pairs: list[tuple[Appointment, Client]],
+    *,
+    tz: ZoneInfo,
+) -> dict[str, Any]:
+    """Capture what was just shown so the next LLM call can interpret
+    «эту запись» / «первую» / «удали ту что на 8 мая» relative to it."""
+    items = []
+    for appt, client in pairs:
+        local = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(tz)
+        items.append(
+            {
+                "client_name": client.name,
+                "date": local.date().isoformat(),
+                "time": local.strftime("%H:%M"),
+                "note": appt.visit_note,
+            }
+        )
+    return {"appointments": items}
 
 
 async def _hydrate(

@@ -61,6 +61,37 @@ _RESERVED_TEXT_BUTTONS = {
 }
 
 
+# In-memory short-term «what did the bot just show» memory keyed by chat_id.
+# Stored: {"snapshot": dict, "saved_at_utc": datetime}. TTL 10 min.
+# A bot restart wipes it — that's fine; context is anyway about the last
+# ~minute of conversation, not long-term state.
+_INTAKE_CONTEXT_TTL_SEC = 600
+_INTAKE_CONTEXT: dict[int, dict[str, Any]] = {}
+
+
+def _save_context(chat_id: int, snapshot: dict[str, Any]) -> None:
+    _INTAKE_CONTEXT[chat_id] = {
+        "snapshot": snapshot,
+        "saved_at_utc": datetime.now(tz=timezone.utc),
+    }
+
+
+def _get_context(chat_id: int) -> dict[str, Any] | None:
+    entry = _INTAKE_CONTEXT.get(chat_id)
+    if entry is None:
+        return None
+    age = (datetime.now(tz=timezone.utc) - entry["saved_at_utc"]).total_seconds()
+    if age > _INTAKE_CONTEXT_TTL_SEC:
+        _INTAKE_CONTEXT.pop(chat_id, None)
+        return None
+    snapshot = entry["snapshot"]
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _clear_context(chat_id: int) -> None:
+    _INTAKE_CONTEXT.pop(chat_id, None)
+
+
 # Lazy registry init — first import.
 _REGISTRY_READY = False
 
@@ -237,7 +268,11 @@ async def _dispatch(
         tz = await settings_service.get_timezone(session)
         now_local = datetime.now(tz=tz)
         now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None)
-        prompt = build_system_prompt(now_local=now_local, tz=settings.owner_tz)
+        prompt = build_system_prompt(
+            now_local=now_local,
+            tz=settings.owner_tz,
+            context_snapshot=_get_context(chat_id),
+        )
 
         try:
             parsed = await llm.parse_intent(
@@ -297,6 +332,8 @@ async def _render(
     status_msg_id: int,
 ) -> None:
     if response.result is ActionResult.EXECUTED:
+        if response.context_snapshot is not None:
+            _save_context(chat_id, response.context_snapshot)
         await _replace_status(
             bot, chat_id, status_msg_id, response.text,
             reply_markup=response.keyboard,
@@ -439,6 +476,9 @@ async def on_confirm(
         response = await action.execute(ctx, payload)
 
     await state.clear()
+    # Mutating action just ran — any prior «what was shown» context is stale.
+    if response.result is ActionResult.EXECUTED:
+        _clear_context(chat_id)
     await _replace_status(
         bot, chat_id, msg_id, response.text, reply_markup=response.keyboard
     )

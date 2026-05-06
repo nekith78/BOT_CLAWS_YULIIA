@@ -104,6 +104,12 @@ class ActionResponse:
     keyboard: InlineKeyboardMarkup | None = None
     clarify_options: list[ClarifyOption] | None = None
     pending_payload: dict[str, Any] | None = None
+    # `context_snapshot` is a small dict the action can leave behind after
+    # an EXECUTED read-only result (list of appointments / history). The
+    # intake handler stashes it in a short-lived per-chat memory so the
+    # next LLM call sees what the bot just showed — enables follow-ups
+    # like «удали эту запись» referring back to a list.
+    context_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

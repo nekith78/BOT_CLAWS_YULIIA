@@ -13,15 +13,21 @@ Design notes:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 _WEEKDAYS_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-def build_system_prompt(*, now_local: datetime, tz: str) -> str:
+def build_system_prompt(
+    *,
+    now_local: datetime,
+    tz: str,
+    context_snapshot: dict[str, Any] | None = None,
+) -> str:
     weekday = _WEEKDAYS_RU[now_local.weekday()]
     today_iso = now_local.date().isoformat()
     now_hhmm = now_local.strftime("%H:%M")
-    return f"""\
+    base = f"""\
 Ты — парсер команд для Telegram-бота, который ведёт расписание клиентов
 маникюрного мастера. Получаешь фразу по-русски (голос или текст),
 выбираешь одну из tools и заполняешь аргументы. Свободного ответа не
@@ -66,3 +72,34 @@ def build_system_prompt(*, now_local: datetime, tz: str) -> str:
 Если в одной фразе несколько действий («запиши X и Y одновременно») —
 вызови tool для первого, второе пользователь повторит.
 """
+    if context_snapshot:
+        return base + _render_context(context_snapshot)
+    return base
+
+
+def _render_context(snapshot: dict[str, Any]) -> str:
+    items = snapshot.get("appointments") or []
+    if not items:
+        return ""
+    lines = [
+        "",
+        "КОНТЕКСТ предыдущего ответа (бот недавно показал пользователю эти "
+        "записи; используй ТОЛЬКО если пользователь ссылается выражениями "
+        "«эту запись», «ту», «первую», «последнюю», «удали запись» без "
+        "уточнения чьей):",
+    ]
+    for idx, item in enumerate(items, start=1):
+        client = item.get("client_name") or "?"
+        date_iso = item.get("date") or "?"
+        time_hhmm = item.get("time") or "?"
+        note = item.get("note")
+        suffix = f" — {note}" if note else ""
+        lines.append(
+            f"{idx}. {client} — {date_iso} {time_hhmm}{suffix}"
+        )
+    lines.append(
+        "Когда пользователь ссылается на одну из этих записей — подставь её "
+        "client_name + date + time в аргументы tool. Если ссылка двусмысленна, "
+        "бери первую — бот сам спросит уточнение если что."
+    )
+    return "\n".join(lines) + "\n"

@@ -120,6 +120,34 @@ async def test_week_groups_by_day(session: AsyncSession) -> None:
     assert len(resp.keyboard.inline_keyboard) == 2
 
 
+async def test_today_attaches_context_snapshot_for_followups(
+    session: AsyncSession,
+) -> None:
+    """After a list result, the action stashes appointments in
+    `context_snapshot` so the intake handler can inject them into the
+    next LLM prompt as «recently shown items»."""
+    client = await ClientRepository(session).create(name="Костя")
+    appt_repo = AppointmentRepository(session)
+    today = date(2026, 5, 7)
+    await appt_repo.create(
+        client_id=client.id,
+        starts_at=_local_to_utc(today, 11, 0),
+        duration_min=60,
+        visit_note="френч",
+    )
+
+    ctx = build_ctx(session, now_local=datetime(today.year, today.month, today.day, 9, 0))
+    resp = await ACTION.plan(ctx, {"period": "today"})
+
+    assert resp.result is ActionResult.EXECUTED
+    assert resp.context_snapshot is not None
+    items = resp.context_snapshot["appointments"]
+    assert len(items) == 1
+    assert items[0]["client_name"] == "Костя"
+    assert items[0]["time"] == "11:00"
+    assert items[0]["note"] == "френч"
+
+
 async def test_all_period_excludes_past(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     appt_repo = AppointmentRepository(session)
