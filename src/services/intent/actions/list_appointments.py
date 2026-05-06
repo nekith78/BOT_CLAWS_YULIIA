@@ -32,13 +32,13 @@ _VALID_PERIODS = {"today", "tomorrow", "week", "month", "all", "date"}
 
 
 class ListAppointmentsAction:
-    name = "list_appointments"
-    description = (
+    name: ClassVar[str] = "list_appointments"
+    description: ClassVar[str] = (
         "Показать список записей за период: сегодня, завтра, неделя, "
         "месяц, все будущие, или конкретная дата. Это read-only — "
         "ничего не меняет в БД."
     )
-    confirm_required = False
+    confirm_required: ClassVar[bool] = False
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

@@ -27,13 +27,13 @@ from src.storage.repositories.clients import ClientRepository
 
 
 class MoveAppointmentAction:
-    name = "move_appointment"
-    description = (
+    name: ClassVar[str] = "move_appointment"
+    description: ClassVar[str] = (
         "Перенести существующую запись клиента на другую дату/время. "
         "Используй для команд «перенеси Иру на 16 мая», «перенеси с 14:30 "
         "на 16:00», «перенеси запись Иры на завтра в 11:00»."
     )
-    confirm_required = True
+    confirm_required: ClassVar[bool] = True
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

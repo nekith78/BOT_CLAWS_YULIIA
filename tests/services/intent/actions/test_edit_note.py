@@ -1,0 +1,68 @@
+"""Tests for EditNoteAction."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timezone
+from zoneinfo import ZoneInfo
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.services.intent.actions.edit_note import EditNoteAction
+from src.services.intent.types import ActionResult
+from src.storage.repositories.appointments import AppointmentRepository
+from src.storage.repositories.clients import ClientRepository
+from tests.services.intent.actions.conftest import build_ctx
+
+ACTION = EditNoteAction()
+TZ = ZoneInfo("Asia/Almaty")
+
+
+def _local_to_utc(d: date, hh: int, mm: int) -> datetime:
+    return (
+        datetime.combine(d, time(hh, mm), tzinfo=TZ)
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+
+
+async def test_plan_fails_without_note(session: AsyncSession) -> None:
+    client = await ClientRepository(session).create(name="Ира")
+    await AppointmentRepository(session).create(
+        client_id=client.id, starts_at=_local_to_utc(date(2026, 5, 10), 11, 0), duration_min=60
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+    resp = await ACTION.plan(ctx, {"client_name": "Ира", "note": "  "})
+    assert resp.result is ActionResult.FAIL
+
+
+async def test_plan_returns_confirm_with_note_payload(session: AsyncSession) -> None:
+    client = await ClientRepository(session).create(name="Ира")
+    appt = await AppointmentRepository(session).create(
+        client_id=client.id, starts_at=_local_to_utc(date(2026, 5, 10), 11, 0), duration_min=60
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(ctx, {"client_name": "Ира", "note": "френч"})
+
+    assert resp.result is ActionResult.CONFIRM
+    assert resp.pending_payload == {
+        "appointment_id": appt.id,
+        "note": "френч",
+    }
+
+
+async def test_execute_updates_visit_note(session: AsyncSession) -> None:
+    client = await ClientRepository(session).create(name="Ира")
+    appt = await AppointmentRepository(session).create(
+        client_id=client.id, starts_at=_local_to_utc(date(2026, 5, 10), 11, 0), duration_min=60
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.execute(
+        ctx, {"appointment_id": appt.id, "note": "гель-лак"}
+    )
+
+    assert resp.result is ActionResult.EXECUTED
+    refreshed = await AppointmentRepository(session).get(appt.id)
+    assert refreshed is not None
+    assert refreshed.visit_note == "гель-лак"

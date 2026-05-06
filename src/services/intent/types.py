@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -131,10 +131,11 @@ class Action(Protocol):
     `execute` runs (destructive actions: True; read-only listings: False).
     """
 
-    name: str
-    description: str
-    confirm_required: bool
-    params_schema: dict[str, Any]
+    # All four are class-level constants on each concrete Action.
+    name: ClassVar[str]
+    description: ClassVar[str]
+    confirm_required: ClassVar[bool]
+    params_schema: ClassVar[dict[str, Any]]
 
     async def plan(self, ctx: ActionContext, args: dict[str, Any]) -> ActionResponse: ...
     async def execute(self, ctx: ActionContext, payload: dict[str, Any]) -> ActionResponse: ...

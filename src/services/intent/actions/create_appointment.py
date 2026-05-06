@@ -31,12 +31,12 @@ from src.storage.repositories.clients import ClientRepository
 
 
 class CreateAppointmentAction:
-    name = "create_appointment"
-    description = (
+    name: ClassVar[str] = "create_appointment"
+    description: ClassVar[str] = (
         "Создать новую запись клиенту. Используй для команд "
         "«запиши Иру на завтра в 14:30», «запиши клиента Х на 8 мая в 11:00»."
     )
-    confirm_required = True
+    confirm_required: ClassVar[bool] = True
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
