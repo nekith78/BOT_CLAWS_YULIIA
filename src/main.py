@@ -7,9 +7,10 @@ Startup pipeline:
 4. Run pending Alembic migrations programmatically
    (skipped here — handled by docker-compose entrypoint)
 5. Seed defaults (idempotent)
-6. Build dispatcher: Redis FSM storage + WhitelistMiddleware +
+6. Build APScheduler + recovery for missed notifications
+7. Build dispatcher: Redis FSM storage + WhitelistMiddleware +
    ConcurrencyMiddleware on callback_query + all routers
-7. Start polling
+8. Start polling
 """
 
 from __future__ import annotations
@@ -17,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from src.bot.handlers import (
@@ -50,6 +53,11 @@ from src.bot.middlewares.concurrency import ConcurrencyMiddleware
 from src.bot.middlewares.whitelist import WhitelistMiddleware
 from src.config import Settings, ensure_data_dir, load_settings
 from src.services import settings_service
+from src.services.notifications.scheduler import (
+    build_scheduler,
+    make_job_runner,
+    recover_missed_jobs,
+)
 from src.storage import db
 
 
@@ -72,6 +80,8 @@ async def _seed_defaults(factory: async_sessionmaker[AsyncSession]) -> None:
 def _build_dispatcher(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
+    scheduler: AsyncIOScheduler,
+    notify_runner: Any,
 ) -> Dispatcher:
     storage = RedisStorage.from_url(
         settings.redis_url,
@@ -80,8 +90,10 @@ def _build_dispatcher(
     )
     dp = Dispatcher(storage=storage)
 
-    # Make the session factory available to every handler as a `session_factory` kwarg.
+    # Make session factory + notification deps available to handlers as kwargs.
     dp["session_factory"] = session_factory
+    dp["scheduler"] = scheduler
+    dp["notify_runner"] = notify_runner
 
     # Whitelist must run before any router so unauthorised updates never reach handlers.
     dp.update.outer_middleware(WhitelistMiddleware(owner_chat_id=settings.owner_chat_id))
@@ -119,11 +131,40 @@ async def run() -> None:
             token=settings.bot_token.get_secret_value(),
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
-        dp = _build_dispatcher(settings, session_factory)
+
+        scheduler = build_scheduler(settings.db_url)
+        scheduler.start()
+        notify_runner = make_job_runner(
+            bot=bot,
+            session_factory=session_factory,
+            owner_chat_id=settings.owner_chat_id,
+        )
 
         try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            # Catch up on notifications missed while the bot was offline.
+            async with db.session_scope(session_factory) as session:
+                tz = await settings_service.get_timezone(session)
+                now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+                sent_late, skipped = await recover_missed_jobs(
+                    session,
+                    bot=bot,
+                    owner_chat_id=settings.owner_chat_id,
+                    tz=tz,
+                    now_utc=now_utc,
+                )
+            log.info(
+                "notification recovery: sent_late=%s skipped=%s",
+                sent_late, skipped,
+            )
+
+            dp = _build_dispatcher(
+                settings, session_factory, scheduler, notify_runner
+            )
+            await dp.start_polling(
+                bot, allowed_updates=dp.resolve_used_update_types()
+            )
         finally:
+            scheduler.shutdown(wait=False)
             await bot.session.close()
     finally:
         await engine.dispose()
