@@ -188,6 +188,19 @@ async def test_list_for_client_filters_by_window(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_for_client_excludes_cancelled_by_default(session: AsyncSession) -> None:
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+    a = await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 6, 10))
+    b = await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 7, 11))
+    await appts.update_status(b.id, "cancelled")
+
+    result = await appts.list_for_client(client.id)
+    assert [appt.id for appt in result] == [a.id]
+
+
+@pytest.mark.asyncio
 async def test_update_visit_note(session: AsyncSession) -> None:
     clients = ClientRepository(session)
     appts = AppointmentRepository(session)

@@ -119,11 +119,15 @@ class AppointmentRepository:
         self,
         client_id: int,
         *,
-        statuses: tuple[str, ...] = ("scheduled", "done", "cancelled"),
+        statuses: tuple[str, ...] = ("scheduled", "done"),
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> list[Appointment]:
-        """All appointments for a client, newest first. Optional date window."""
+        """Appointments for a client, newest first. Excludes cancelled by
+        default — user policy: cancelled rows must not appear in any list.
+
+        Optional date window narrows by `starts_at` ∈ [start, end).
+        """
         stmt = select(Appointment).where(
             Appointment.client_id == client_id,
             Appointment.status.in_(statuses),

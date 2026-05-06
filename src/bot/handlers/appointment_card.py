@@ -206,11 +206,14 @@ async def on_note_text(message: Message, state: FSMContext, bot: Bot, **data: An
 async def on_cancel_start(
     callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    log.info("on_cancel_start: appt_id=%s", callback_data.appointment_id)
     if callback.message is None:
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    if await _load_active(factory, callback_data.appointment_id) is None:
+    active = await _load_active(factory, callback_data.appointment_id)
+    log.info("on_cancel_start: _load_active → %s", "active" if active else "None")
+    if active is None:
         await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
     await state.update_data(cancel_appointment_id=callback_data.appointment_id)
@@ -245,16 +248,19 @@ async def on_cancel_start(
 async def on_cancel_confirmed(
     callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    log.info("on_cancel_confirmed entry")
     if callback.message is None:
         await callback.answer()
         return
     state_data = await state.get_data()
+    log.info("on_cancel_confirmed: state_data=%s", state_data)
     if not state_data.get("cancel_confirm"):
-        # Not a cancel confirm — likely reschedule path; ignore here.
+        log.info("on_cancel_confirmed: cancel_confirm not set, ignoring")
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
     appt_id = int(state_data["cancel_appointment_id"])
+    log.info("on_cancel_confirmed: cancelling appt_id=%s", appt_id)
     async with session_scope(factory) as session:
         repo = AppointmentRepository(session)
         appt = await repo.get(appt_id)
