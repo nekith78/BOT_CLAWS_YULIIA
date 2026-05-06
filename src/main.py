@@ -41,6 +41,9 @@ from src.bot.handlers import (
     lists as lists_handlers,
 )
 from src.bot.handlers import (
+    notify_settings as notify_settings_handlers,
+)
+from src.bot.handlers import (
     start as start_handlers,
 )
 from src.bot.handlers import (
@@ -107,6 +110,7 @@ def _build_dispatcher(
     dp.include_router(text_add_handlers.router)
     dp.include_router(lists_handlers.router)
     dp.include_router(clients_handlers.router)
+    dp.include_router(notify_settings_handlers.router)
     dp.include_router(appt_card_handlers.router)
     return dp
 

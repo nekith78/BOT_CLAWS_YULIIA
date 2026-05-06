@@ -11,7 +11,7 @@ from src.bot.callback_data import PeriodCD
 
 def period_picker_kb(
     *,
-    scope: Literal["lists", "client"],
+    scope: Literal["lists", "client", "notify_settings"],
     scope_id: int = 0,
 ) -> InlineKeyboardMarkup:
     def btn(text: str, kind: str) -> InlineKeyboardButton:

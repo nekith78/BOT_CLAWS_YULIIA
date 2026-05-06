@@ -11,8 +11,14 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import ErrorEvent, Message
+from aiogram.types import (
+    ErrorEvent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
+from src.bot.callback_data import SettingsCD
 from src.bot.ui import cancel as ui_cancel
 
 log = logging.getLogger(__name__)
@@ -44,14 +50,23 @@ async def handle_help(message: Message, bot: Bot) -> None:
 
 
 @router.message(F.text == "⚙️ Настройки")
-async def handle_settings_stub(message: Message, bot: Bot) -> None:
-    """Placeholder — full /settings UI lands in Plan #3 (Notifications)."""
+async def handle_settings_menu(message: Message, bot: Bot) -> None:
+    """Top-level settings menu. Currently exposes notifications only;
+    timezone editor and others are stubs for later plans."""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔔 Настройка уведомлений",
+                    callback_data=SettingsCD(action="notifications").pack(),
+                )
+            ],
+        ]
+    )
     await bot.send_message(
         chat_id=message.chat.id,
-        text=(
-            "🚧 Раздел в работе — появится в следующем этапе (Notifications).\n"
-            "Сейчас доступны: создание/перенос/отмена записей, списки, история клиента."
-        ),
+        text="⚙️ Настройки\n\nВыбери раздел:",
+        reply_markup=kb,
     )
 
 

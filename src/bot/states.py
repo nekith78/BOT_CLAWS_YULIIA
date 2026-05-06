@@ -43,3 +43,18 @@ class ListsFilter(StatesGroup):
 class BrowseClients(StatesGroup):
     searching = State()
     confirming_delete = State()
+
+
+class NotifySettings(StatesGroup):
+    """Per-appointment notify-rule editor flow.
+
+    Started from ⚙️ Настройки → 🔔 Настройка уведомлений.
+    """
+
+    choosing_period = State()      # which slice of appointments to list
+    choosing_date = State()        # calendar open in notify-settings scope
+    listing_appointments = State()
+    viewing_rules = State()        # the per-appointment screen
+    adding_rule_kind = State()     # picking time_day_before / time_same_day / offset_before
+    adding_rule_time = State()     # entering HH:MM
+    adding_rule_offset = State()   # entering "60m" / "2h" / "1d"
