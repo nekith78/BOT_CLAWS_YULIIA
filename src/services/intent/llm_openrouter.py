@@ -4,9 +4,10 @@ OpenRouter is a model-aggregator with an OpenAI-compatible Chat Completions
 endpoint and a real free tier (no profile-completion gating). We reuse the
 official `openai` SDK pointed at OpenRouter's base URL.
 
-Default model: `deepseek/deepseek-chat-v3-0324:free` — DeepSeek V3 routed
-free through OpenRouter; great function-calling, very strong Russian,
-historically less rate-limited than llama-3.3-70b:free.
+Default model: `openai/gpt-oss-120b:free` — OpenAI's open-weights 120B
+model routed free through OpenRouter; native function-calling, strong
+Russian, broadly available across multiple upstream providers (less
+likely to hit «no endpoints found» than provider-specific free slugs).
 
 Free-tier models on OpenRouter share upstream capacity across all users.
 A single 429 doesn't mean the key is broken — it means the upstream
@@ -32,7 +33,7 @@ class OpenRouterLLM:
         self,
         *,
         api_key: str,
-        model: str = "deepseek/deepseek-chat-v3-0324:free",
+        model: str = "openai/gpt-oss-120b:free",
     ) -> None:
         from openai import AsyncOpenAI
 
