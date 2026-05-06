@@ -207,19 +207,21 @@ class TestDateShortcutKb:
         texts = {b.text for row in kb.inline_keyboard for b in row}
         assert texts == {"Сегодня", "Завтра", "Послезавтра", "📅 Календарь"}
 
-    def test_with_client_id_includes_delete_button(self) -> None:
+    def test_with_client_id_includes_delete_button_last(self) -> None:
         kb = date_shortcut_kb(client_id=42)
         texts = {b.text for row in kb.inline_keyboard for b in row}
         assert texts == {
             "Сегодня",
             "Завтра",
             "Послезавтра",
-            "🗑 Удалить клиента",
             "📅 Календарь",
+            "🗑 Удалить клиента",
         }
-        # Delete button must carry client_id=42 in its callback_data.
-        for row in kb.inline_keyboard:
-            for b in row:
-                if b.text == "🗑 Удалить клиента":
-                    assert b.callback_data is not None
-                    assert "client|1|delete|42" in b.callback_data
+        # Delete button must be in the LAST row (destructive action parked
+        # away from the day-shortcuts and the calendar).
+        last_row_texts = [b.text for b in kb.inline_keyboard[-1]]
+        assert last_row_texts == ["🗑 Удалить клиента"]
+        # And it must carry client_id=42 in its callback_data.
+        for b in kb.inline_keyboard[-1]:
+            assert b.callback_data is not None
+            assert "client|1|delete|42" in b.callback_data
