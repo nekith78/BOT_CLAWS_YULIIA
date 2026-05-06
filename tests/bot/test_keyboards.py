@@ -169,33 +169,12 @@ class TestClientPicker:
         assert "Олег #1" in texts
         assert "ОЛЕГ #2" in texts
 
-    def test_pick_mode_has_delete_entry_point(self) -> None:
+    def test_picker_has_no_delete_entry_point(self) -> None:
+        """Delete moved into the per-client card, not the picker footer."""
         clients = [Client(id=1, name="Олег", instagram=None, notes=None, created_at=None)]
-        kb = client_picker_kb(recent=clients)  # default mode="pick"
+        kb = client_picker_kb(recent=clients)
         texts = [b.text for row in kb.inline_keyboard for b in row]
-        assert "🗑 Удалить клиента" in texts
-        # Client buttons emit ClientCD(action="pick", client_id=...)
-        for row in kb.inline_keyboard:
-            for b in row:
-                if b.text == "Олег":
-                    assert b.callback_data is not None
-                    assert "client|1|pick|" in b.callback_data
-
-    def test_delete_mode_emits_delete_action_and_back(self) -> None:
-        clients = [Client(id=1, name="Олег", instagram=None, notes=None, created_at=None)]
-        kb = client_picker_kb(recent=clients, mode="delete")
-        texts = [b.text for row in kb.inline_keyboard for b in row]
-        assert "← Назад" in texts
-        # Pick footer must NOT be present in delete mode.
-        assert "🔍 Поиск" not in texts
-        assert "➕ Новый клиент" not in texts
         assert "🗑 Удалить клиента" not in texts
-        # Client buttons emit ClientCD(action="delete", ...)
-        for row in kb.inline_keyboard:
-            for b in row:
-                if b.text == "Олег":
-                    assert b.callback_data is not None
-                    assert "client|1|delete|" in b.callback_data
 
 
 class TestConfirmKb:

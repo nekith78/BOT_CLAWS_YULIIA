@@ -80,7 +80,7 @@ async def entry(message: Message, state: FSMContext, bot: Bot, **data: Any) -> N
 
 @router.callback_query(AddAppointment.choosing_client, ClientCD.filter(F.action == "pick"))
 async def on_client_picked(
-    callback: CallbackQuery, callback_data: ClientCD, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: ClientCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
@@ -93,9 +93,67 @@ async def on_client_picked(
         await state.set_state(AddAppointment.searching_client)
         await callback.answer()
         return
-    await state.update_data(client_id=callback_data.client_id)
-    await _go_to_date_step(bot, chat_id=chat_id, state=state)
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    await _show_client_card_in_wizard(
+        bot, chat_id=chat_id, state=state, factory=factory, client_id=callback_data.client_id
+    )
     await callback.answer()
+
+
+async def _show_client_card_in_wizard(
+    bot: Bot,
+    *,
+    chat_id: int,
+    state: FSMContext,
+    factory: async_sessionmaker[Any],
+    client_id: int,
+) -> None:
+    """Render the client card with [✅ Записать] [🗑 Удалить клиента] [← Назад].
+
+    The card sits between the picker and the date step — tapping a client
+    no longer auto-advances to the date wizard.
+    """
+    async with session_scope(factory) as session:
+        client = await ClientRepository(session).get(client_id)
+    if client is None:
+        await advance(
+            bot, chat_id=chat_id, state=state,
+            text="Клиент не найден.", reply_markup=None,
+        )
+        await state.set_state(AddAppointment.choosing_client)
+        return
+    insta = (
+        f"📷 <a href=\"https://instagram.com/{html.escape(client.instagram)}\">"
+        f"{html.escape(client.instagram)}</a>\n"
+        if client.instagram else ""
+    )
+    notes = f"📝 {html.escape(client.notes)}\n" if client.notes else ""
+    text = f"<b>{html.escape(client.name)}</b>\n{insta}{notes}".rstrip()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Записать",
+                    callback_data=WizardCD(action="save").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить клиента",
+                    callback_data=ClientCD(action="delete", client_id=client_id).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← Назад",
+                    callback_data=WizardCD(action="back").pack(),
+                ),
+            ],
+        ]
+    )
+    await state.update_data(viewing_client_id=client_id)
+    await advance(bot, chat_id=chat_id, state=state, text=text, reply_markup=kb)
+    await state.set_state(AddAppointment.viewing_client)
 
 
 @router.callback_query(AddAppointment.choosing_client, ClientCD.filter(F.action == "new"))
@@ -114,35 +172,32 @@ async def on_client_new(callback: CallbackQuery, state: FSMContext, bot: Bot, **
     await callback.answer()
 
 
-# ---- delete-mode in picker (🗑 Удалить клиента) ---------------------------
+# ---- viewing_client: the client card inside the wizard ----------------------
 
 
-@router.callback_query(AddAppointment.choosing_client, WizardCD.filter(F.action == "edit"))
-async def on_enter_delete_mode(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+@router.callback_query(AddAppointment.viewing_client, WizardCD.filter(F.action == "save"))
+async def on_book_from_card(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
 ) -> None:
+    """✅ Записать → save client_id and continue to the date step."""
     if callback.message is None:
         await callback.answer()
         return
-    factory = cast(async_sessionmaker[Any], data["session_factory"])
-    async with session_scope(factory) as session:
-        recent = await ClientRepository(session).list_recent(limit=10)
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        text="Кого удалить?",
-        reply_markup=client_picker_kb(recent=recent, mode="delete"),
-    )
-    await state.set_state(AddAppointment.deleting_client)
+    state_data = await state.get_data()
+    client_id = state_data.get("viewing_client_id")
+    if client_id is None:
+        await callback.answer("Контекст потерян.", show_alert=True)
+        return
+    await state.update_data(client_id=int(client_id))
+    await _go_to_date_step(bot, chat_id=callback.message.chat.id, state=state)
     await callback.answer()
 
 
-@router.callback_query(AddAppointment.deleting_client, WizardCD.filter(F.action == "back"))
-async def on_exit_delete_mode(
+@router.callback_query(AddAppointment.viewing_client, WizardCD.filter(F.action == "back"))
+async def on_back_from_card(
     callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
-    """← Назад in delete-mode picker → restore the normal pick-mode picker."""
+    """← Назад → restore the picker."""
     if callback.message is None:
         await callback.answer()
         return
@@ -163,10 +218,11 @@ async def on_exit_delete_mode(
     await callback.answer()
 
 
-@router.callback_query(AddAppointment.deleting_client, ClientCD.filter(F.action == "delete"))
-async def on_pick_for_delete(
+@router.callback_query(AddAppointment.viewing_client, ClientCD.filter(F.action == "delete"))
+async def on_delete_from_card(
     callback: CallbackQuery, callback_data: ClientCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    """🗑 Удалить клиента → confirm dialog with future-count warning."""
     if callback.message is None:
         await callback.answer()
         return
@@ -186,7 +242,6 @@ async def on_pick_for_delete(
     if client is None:
         await callback.answer("Клиент не найден.", show_alert=True)
         return
-
     body = f"Удалить клиента <b>{html.escape(client.name)}</b>?"
     if future_count:
         body += (
@@ -224,6 +279,7 @@ async def on_pick_for_delete(
 async def on_confirm_delete(
     callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    """Да, удалить → cascade-delete and return to the picker."""
     if callback.message is None:
         await callback.answer()
         return
@@ -233,26 +289,19 @@ async def on_confirm_delete(
     if client_id is not None:
         async with session_scope(factory) as session:
             await ClientRepository(session).delete(int(client_id))
-    # Return to delete-mode picker so user can keep cleaning up.
     async with session_scope(factory) as session:
         recent = await ClientRepository(session).list_recent(limit=10)
+    text = "🗑 Удалён. Кого записываем?"
     if not recent:
-        await advance(
-            bot,
-            chat_id=callback.message.chat.id,
-            state=state,
-            text="🗑 Удалено. Клиентов больше нет.",
-            reply_markup=client_picker_kb(recent=[], mode="delete"),
-        )
-    else:
-        await advance(
-            bot,
-            chat_id=callback.message.chat.id,
-            state=state,
-            text="🗑 Удалено. Кого ещё удалить? (← Назад чтобы вернуться)",
-            reply_markup=client_picker_kb(recent=recent, mode="delete"),
-        )
-    await state.set_state(AddAppointment.deleting_client)
+        text = "🗑 Удалён. Клиентов больше нет — создай нового."
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text=text,
+        reply_markup=client_picker_kb(recent=recent),
+    )
+    await state.set_state(AddAppointment.choosing_client)
     await callback.answer()
 
 
@@ -260,20 +309,33 @@ async def on_confirm_delete(
 async def on_abort_delete(
     callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    """Не надо → back to the client card the user came from."""
     if callback.message is None:
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    async with session_scope(factory) as session:
-        recent = await ClientRepository(session).list_recent(limit=10)
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        text="Кого удалить?",
-        reply_markup=client_picker_kb(recent=recent, mode="delete"),
-    )
-    await state.set_state(AddAppointment.deleting_client)
+    state_data = await state.get_data()
+    client_id = state_data.get("viewing_client_id") or state_data.get("delete_client_id")
+    if client_id is None:
+        # Lost context — fall back to picker.
+        async with session_scope(factory) as session:
+            recent = await ClientRepository(session).list_recent(limit=10)
+        await advance(
+            bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            text="Кого записываем?",
+            reply_markup=client_picker_kb(recent=recent),
+        )
+        await state.set_state(AddAppointment.choosing_client)
+    else:
+        await _show_client_card_in_wizard(
+            bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            factory=factory,
+            client_id=int(client_id),
+        )
     await callback.answer()
 
 
