@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
@@ -50,6 +50,29 @@ class OpenRouterLLM:
             },
         )
         self._model = model
+        # Local daily request counter — OpenRouter doesn't expose per-:free-model
+        # daily count via API, so we count ourselves. Counter resets at 00:00 UTC.
+        # On bot restart it resets too (worst case /quota under-counts for a day).
+        self._daily_used = 0
+        self._counter_day: date | None = None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def daily_used(self) -> int:
+        """Requests this OpenRouter client made today (UTC). Reset at midnight."""
+        today = datetime.now(tz=timezone.utc).date()
+        if self._counter_day != today:
+            return 0
+        return self._daily_used
+
+    def _bump_counter(self) -> None:
+        today = datetime.now(tz=timezone.utc).date()
+        if self._counter_day != today:
+            self._daily_used = 0
+            self._counter_day = today
+        self._daily_used += 1
 
     async def parse_intent(
         self,
@@ -116,7 +139,7 @@ class OpenRouterLLM:
         last_exc: Exception | None = None
         while attempts < 2:
             try:
-                return await self._client.chat.completions.create(  # type: ignore[call-overload]
+                response = await self._client.chat.completions.create(  # type: ignore[call-overload]
                     model=self._model,
                     messages=messages,
                     tools=openai_tools,
@@ -124,6 +147,8 @@ class OpenRouterLLM:
                     temperature=0.0,
                 )
             except RateLimitError as exc:
+                # OR counts even rate-limited calls against the daily quota.
+                self._bump_counter()
                 last_exc = exc
                 if attempts >= 1:
                     raise
@@ -134,6 +159,9 @@ class OpenRouterLLM:
                 )
                 await asyncio.sleep(2.0)
                 attempts += 1
+                continue
+            self._bump_counter()
+            return response
         assert last_exc is not None
         raise last_exc
 
