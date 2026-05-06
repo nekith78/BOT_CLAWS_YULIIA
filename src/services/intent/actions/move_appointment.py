@@ -236,6 +236,9 @@ class MoveAppointmentAction:
                 result=ActionResult.FAIL, text="Запись не найдена."
             )
 
+        # Release the SQLite write lock before APScheduler writes apscheduler_jobs.
+        await ctx.session.commit()
+
         await reschedule_for_appointment(
             ctx.session,
             scheduler=ctx.scheduler,

@@ -146,6 +146,9 @@ class CancelAppointmentAction:
         if updated is None:
             return ActionResponse(result=ActionResult.FAIL, text="Запись не найдена.")
 
+        # Release the SQLite write lock before APScheduler removes its row.
+        await ctx.session.commit()
+
         await cancel_for_appointment(
             ctx.session, scheduler=ctx.scheduler, appointment_id=appt_id
         )

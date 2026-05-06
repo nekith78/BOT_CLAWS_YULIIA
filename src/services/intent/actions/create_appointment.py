@@ -184,6 +184,10 @@ class CreateAppointmentAction:
             visit_note=payload.get("note"),
         )
 
+        # Release the SQLite write lock before APScheduler tries to insert
+        # its own row (apscheduler_jobs lives in the same DB file).
+        await ctx.session.commit()
+
         await reschedule_for_appointment(
             ctx.session,
             scheduler=ctx.scheduler,
