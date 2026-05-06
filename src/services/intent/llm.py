@@ -32,7 +32,9 @@ def get_llm(settings: Settings) -> LLMProvider:
 
         if settings.gemini_api_key is None:
             raise RuntimeError("GEMINI_API_KEY required for gemini")
-        model = settings.llm_model or "gemini-2.5-flash"
+        # gemini-2.0-flash is more reliable on the free tier than 2.5-flash,
+        # which gets throttled hard during peak load (frequent 503s).
+        model = settings.llm_model or "gemini-2.0-flash"
         return GeminiLLM(
             api_key=settings.gemini_api_key.get_secret_value(),
             model=model,

@@ -246,12 +246,10 @@ async def _dispatch(
                 system=prompt,
                 now_local=now_local,
             )
-        except Exception:
+        except Exception as exc:
             log.exception("intake: LLM parse failed")
-            await _replace_status(
-                bot, chat_id, status_msg_id,
-                "Не могу разобрать команду — попробуй ещё раз или сделай кнопками.",
-            )
+            err_text = _llm_error_text(exc)
+            await _replace_status(bot, chat_id, status_msg_id, err_text)
             return
 
         if parsed.tool_name is None:
@@ -357,6 +355,22 @@ async def _render(
             bot, chat_id, status_msg_id, response.text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
+
+
+def _llm_error_text(exc: Exception) -> str:
+    """Map LLM SDK exception to user-friendly Russian text."""
+    msg = str(exc).lower()
+    if "503" in msg or "unavailable" in msg or "overload" in msg or "high demand" in msg:
+        return (
+            "🤖 Сервис распознавания временно перегружен — "
+            "попробуй через 30 секунд или сделай кнопками."
+        )
+    if "429" in msg or "quota" in msg or "rate limit" in msg.replace("_", " "):
+        return (
+            "🤖 Дневной лимит распознавания исчерпан — "
+            "попробуй завтра или сделай кнопками."
+        )
+    return "🤖 Не могу разобрать команду — попробуй ещё раз или сделай кнопками."
 
 
 def _help_text() -> str:
