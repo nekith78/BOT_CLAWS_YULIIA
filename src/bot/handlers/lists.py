@@ -24,7 +24,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.bot.callback_data import ApptCD, CalendarCD, PeriodCD
+from src.bot.callback_data import ApptCD, CalendarCD, PeriodCD, WizardCD
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.period_picker import period_picker_kb
 from src.bot.states import ListsFilter
@@ -42,6 +42,8 @@ from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
 
 router = Router(name="lists")
+
+_BACK_TO_PERIOD_PICKER = WizardCD(action="back").pack()
 
 
 # ---------- entry: «📋 Записи» reply button ---------------------------------
@@ -101,7 +103,11 @@ async def on_period_picked(
             callback,
             bot=bot,
             text="Выбери день:",
-            reply_markup=calendar_kb(anchor=today_local, counts=counts),
+            reply_markup=calendar_kb(
+                anchor=today_local,
+                counts=counts,
+                back_callback_data=_BACK_TO_PERIOD_PICKER,
+            ),
         )
         await state.set_state(ListsFilter.choosing_date)
         await callback.answer()
@@ -145,13 +151,35 @@ async def on_calendar_nav(
         callback,
         bot=bot,
         text="Выбери день:",
-        reply_markup=calendar_kb(anchor=new_anchor, counts=counts),
+        reply_markup=calendar_kb(
+            anchor=new_anchor,
+            counts=counts,
+            back_callback_data=_BACK_TO_PERIOD_PICKER,
+        ),
     )
     await callback.answer()
 
 
 @router.callback_query(ListsFilter.choosing_date, CalendarCD.filter(F.action == "noop"))
 async def on_calendar_noop(callback: CallbackQuery, **_: Any) -> None:
+    await callback.answer()
+
+
+@router.callback_query(ListsFilter.choosing_date, WizardCD.filter(F.action == "back"))
+async def on_back_to_period_picker(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
+) -> None:
+    """Calendar's «← Назад» — return to the period picker in the same card."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    await show_in_callback(
+        callback,
+        bot=bot,
+        text="За какой период показать записи?",
+        reply_markup=period_picker_kb(scope="lists"),
+    )
+    await state.clear()
     await callback.answer()
 
 

@@ -144,7 +144,7 @@ async def _show_client_card(
         callback_data=ClientCD(action="history", client_id=client_id).pack(),
     )
     delete_btn = InlineKeyboardButton(
-        text="🗑 Удалить",
+        text="🗑 Удалить клиента",
         callback_data=ClientCD(action="delete", client_id=client_id).pack(),
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[history_btn], [delete_btn]])

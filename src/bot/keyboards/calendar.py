@@ -29,7 +29,10 @@ _NOOP = CalendarCD(action="noop").pack()
 
 
 def calendar_kb(
-    *, anchor: date, counts: dict[int, int] | None = None
+    *,
+    anchor: date,
+    counts: dict[int, int] | None = None,
+    back_callback_data: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Build a month grid for `anchor.year/anchor.month`. Day cells emit
     `CalendarCD(action="pick", iso_date=YYYY-MM-DD)`. Nav arrows emit
@@ -38,6 +41,9 @@ def calendar_kb(
     If `counts` is provided, days with at least one appointment get a
     middle-dot suffix with the count: e.g. `15·3` for three appointments
     on the 15th. Days without appointments stay plain (`15`).
+
+    If `back_callback_data` is provided, an extra row with «← Назад» is
+    appended; tapping it sends that callback_data back to the dispatcher.
     """
     year, month = anchor.year, anchor.month
     title = f"{_MONTHS_RU[month]} {year}"
@@ -80,4 +86,8 @@ def calendar_kb(
         ),
     ]
     rows.append(nav)
+    if back_callback_data is not None:
+        rows.append(
+            [InlineKeyboardButton(text="← Назад", callback_data=back_callback_data)]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
