@@ -45,6 +45,17 @@ class BrowseClients(StatesGroup):
     confirming_delete = State()
 
 
+class IntakePending(StatesGroup):
+    """Voice/text intake — pending user decision after Action.plan.
+
+    confirming: action.plan returned CONFIRM, waiting for ✅/✏️/❌.
+    clarifying: action.plan returned CLARIFY, waiting for option pick.
+    """
+
+    confirming = State()
+    clarifying = State()
+
+
 class NotifySettings(StatesGroup):
     """Per-appointment notify-rule editor flow.
 

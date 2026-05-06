@@ -38,6 +38,9 @@ from src.bot.handlers import (
     clients as clients_handlers,
 )
 from src.bot.handlers import (
+    intake as intake_handlers,
+)
+from src.bot.handlers import (
     lists as lists_handlers,
 )
 from src.bot.handlers import (
@@ -56,12 +59,14 @@ from src.bot.middlewares.concurrency import ConcurrencyMiddleware
 from src.bot.middlewares.whitelist import WhitelistMiddleware
 from src.config import Settings, ensure_data_dir, load_settings
 from src.services import settings_service
+from src.services.intent.llm import LLMProvider, get_llm
 from src.services.notifications.scheduler import (
     NOTIFY_RUNNER_PATH,
     build_scheduler,
     configure_runner,
     recover_missed_jobs,
 )
+from src.services.voice.stt import STTProvider, get_stt
 from src.storage import db
 
 
@@ -86,6 +91,8 @@ def _build_dispatcher(
     session_factory: async_sessionmaker[AsyncSession],
     scheduler: AsyncIOScheduler,
     notify_runner: Any,
+    stt: STTProvider,
+    llm: LLMProvider,
 ) -> Dispatcher:
     storage = RedisStorage.from_url(
         settings.redis_url,
@@ -94,10 +101,13 @@ def _build_dispatcher(
     )
     dp = Dispatcher(storage=storage)
 
-    # Make session factory + notification deps available to handlers as kwargs.
+    # Deps available to handlers as kwargs.
     dp["session_factory"] = session_factory
     dp["scheduler"] = scheduler
     dp["notify_runner"] = notify_runner
+    dp["settings"] = settings
+    dp["stt"] = stt
+    dp["llm"] = llm
 
     # Whitelist must run before any router so unauthorised updates never reach handlers.
     dp.update.outer_middleware(WhitelistMiddleware(owner_chat_id=settings.owner_chat_id))
@@ -105,6 +115,7 @@ def _build_dispatcher(
     dp.callback_query.middleware(ConcurrencyMiddleware())
 
     # Order matters: system has the highest priority so /cancel always wins.
+    # Intake is registered LAST so reserved reply-text-buttons keep their handlers.
     dp.include_router(system_handlers.router)
     dp.include_router(start_handlers.router)
     dp.include_router(add_appt_handlers.router)
@@ -113,6 +124,7 @@ def _build_dispatcher(
     dp.include_router(clients_handlers.router)
     dp.include_router(notify_settings_handlers.router)
     dp.include_router(appt_card_handlers.router)
+    dp.include_router(intake_handlers.router)
     return dp
 
 
@@ -149,6 +161,14 @@ async def run() -> None:
         # with SQLAlchemyJobStore's pickle requirement.
         notify_runner = NOTIFY_RUNNER_PATH
 
+        # Voice + LLM providers built once at startup so the model loads
+        # eagerly (faster-whisper takes ~3 sec on first transcription
+        # otherwise — that lag would land on the user's first request).
+        log.info("loading STT provider: %s", settings.stt_provider)
+        stt = get_stt(settings)
+        log.info("loading LLM provider: %s", settings.llm_provider)
+        llm = get_llm(settings)
+
         try:
             # Catch up on notifications missed while the bot was offline.
             async with db.session_scope(session_factory) as session:
@@ -167,7 +187,7 @@ async def run() -> None:
             )
 
             dp = _build_dispatcher(
-                settings, session_factory, scheduler, notify_runner
+                settings, session_factory, scheduler, notify_runner, stt, llm
             )
             await dp.start_polling(
                 bot, allowed_updates=dp.resolve_used_update_types()
