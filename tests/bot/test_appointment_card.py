@@ -104,7 +104,9 @@ async def test_note_edit_updates_visit_note(
 ) -> None:
     appt_id = await _seeded_appt(session_factory)
     cd = ApptCD(action="note", appointment_id=appt_id)
-    await on_note_start(_cb(), callback_data=cd, state=state, bot=bot)
+    await on_note_start(
+        _cb(), callback_data=cd, state=state, bot=bot, session_factory=session_factory
+    )
     assert await state.get_state() == EditAppointment.entering_note.state
 
     msg = MagicMock(spec=Message)
@@ -127,7 +129,9 @@ async def test_cancel_confirm_marks_status_cancelled(
     appt_id = await _seeded_appt(session_factory)
 
     cd = ApptCD(action="cancel", appointment_id=appt_id)
-    await on_cancel_start(_cb(), callback_data=cd, state=state, bot=bot)
+    await on_cancel_start(
+        _cb(), callback_data=cd, state=state, bot=bot, session_factory=session_factory
+    )
     assert await state.get_state() == EditAppointment.choosing_new_date.state
     data = await state.get_data()
     assert data.get("cancel_confirm") is True

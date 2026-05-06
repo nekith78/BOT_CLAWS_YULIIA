@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, cast
 
@@ -20,7 +21,7 @@ from src.bot.callback_data import ApptCD, ClientCD, PeriodCD
 from src.bot.keyboards.client_picker import SEARCH_SENTINEL, client_picker_kb
 from src.bot.keyboards.period_picker import period_picker_kb
 from src.bot.states import BrowseClients, HistoryFilter
-from src.bot.ui import advance
+from src.bot.ui import show_in_callback
 from src.services import settings_service
 from src.services.formatters import (
     format_appointment_line,
@@ -35,6 +36,11 @@ from src.storage.repositories.clients import ClientRepository
 router = Router(name="clients")
 
 
+def _e(value: str | None) -> str:
+    """Escape user-supplied text for HTML parse_mode (issue #1)."""
+    return html.escape(value or "", quote=True)
+
+
 # ---------- entry -----------------------------------------------------------
 
 
@@ -45,18 +51,19 @@ async def handle_clients(
 ) -> None:
     factory = cast(async_sessionmaker[Any], data["session_factory"])
     chat_id = message.chat.id
-    await state.clear()
+    # Clear any browse-side state, but DO NOT touch a parallel wizard's state.
+    if await state.get_state() in (
+        BrowseClients.searching.state,
+        HistoryFilter.entering_date.state,
+    ):
+        await state.clear()
     async with session_scope(factory) as session:
         recent = await ClientRepository(session).list_recent(limit=20)
     if not recent:
         await bot.send_message(chat_id=chat_id, text="Клиентов пока нет.")
         return
-    await advance(
-        bot,
-        chat_id=chat_id,
-        state=state,
-        text="Клиенты:",
-        reply_markup=client_picker_kb(recent=recent),
+    await bot.send_message(
+        chat_id=chat_id, text="Клиенты:", reply_markup=client_picker_kb(recent=recent)
     )
 
 
@@ -67,20 +74,17 @@ async def on_client_pick(
     if callback.message is None:
         await callback.answer()
         return
-    chat_id = callback.message.chat.id
     if callback_data.client_id == SEARCH_SENTINEL:
-        await advance(
-            bot,
-            chat_id=chat_id,
-            state=state,
-            text="Введи часть имени:",
-            reply_markup=None,
+        await show_in_callback(
+            callback, bot=bot, text="Введи часть имени:", reply_markup=None
         )
         await state.set_state(BrowseClients.searching)
         await callback.answer()
         return
     await _show_client_card(
-        bot, chat_id=chat_id, state=state, factory=data["session_factory"],
+        callback,
+        bot=bot,
+        factory=data["session_factory"],
         client_id=callback_data.client_id,
     )
     await callback.answer()
@@ -96,19 +100,14 @@ async def on_search_query(
     async with session_scope(factory) as session:
         matches = await ClientRepository(session).search_by_name(message.text, limit=20)
     if not matches:
-        await advance(
-            bot,
+        await bot.send_message(
             chat_id=message.chat.id,
-            state=state,
             text="Никого не нашёл. Попробуй другое имя или /clients.",
-            reply_markup=None,
         )
         await state.clear()
         return
-    await advance(
-        bot,
+    await bot.send_message(
         chat_id=message.chat.id,
-        state=state,
         text="Найденные:",
         reply_markup=client_picker_kb(recent=matches),
     )
@@ -119,48 +118,45 @@ async def on_search_query(
 
 
 async def _show_client_card(
-    bot: Bot,
+    callback: CallbackQuery,
     *,
-    chat_id: int,
-    state: FSMContext,
+    bot: Bot,
     factory: async_sessionmaker[Any],
     client_id: int,
 ) -> None:
     async with session_scope(factory) as session:
         client = await ClientRepository(session).get(client_id)
     if client is None:
-        await advance(
-            bot, chat_id=chat_id, state=state,
-            text="Клиент не найден.", reply_markup=None,
+        await show_in_callback(
+            callback, bot=bot, text="Клиент не найден.", reply_markup=None
         )
         return
     insta = (
-        f"📷 <a href=\"https://instagram.com/{client.instagram}\">{client.instagram}</a>\n"
+        f"📷 <a href=\"https://instagram.com/{_e(client.instagram)}\">{_e(client.instagram)}</a>\n"
         if client.instagram
         else ""
     )
-    notes = f"📝 {client.notes}\n" if client.notes else ""
-    text = f"<b>{client.name}</b>\n{insta}{notes}".rstrip()
+    notes = f"📝 {_e(client.notes)}\n" if client.notes else ""
+    text = f"<b>{_e(client.name)}</b>\n{insta}{notes}".rstrip()
 
     history_btn = InlineKeyboardButton(
         text="История",
         callback_data=ClientCD(action="history", client_id=client_id).pack(),
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[history_btn]])
-    await advance(bot, chat_id=chat_id, state=state, text=text, reply_markup=kb)
+    await show_in_callback(callback, bot=bot, text=text, reply_markup=kb)
 
 
 @router.callback_query(ClientCD.filter(F.action == "history"))
 async def on_history(
-    callback: CallbackQuery, callback_data: ClientCD, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: ClientCD, bot: Bot, **_: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
         return
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
+    await show_in_callback(
+        callback,
+        bot=bot,
         text="За какой период?",
         reply_markup=period_picker_kb(scope="client", scope_id=callback_data.client_id),
     )
@@ -177,12 +173,10 @@ async def on_period_picked(
     if callback.message is None:
         await callback.answer()
         return
-    chat_id = callback.message.chat.id
     if callback_data.kind == "date":
-        await advance(
-            bot,
-            chat_id=chat_id,
-            state=state,
+        await show_in_callback(
+            callback,
+            bot=bot,
             text="Введи дату YYYY-MM-DD:",
             reply_markup=None,
         )
@@ -191,10 +185,9 @@ async def on_period_picked(
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    await _render_history(
-        bot,
-        chat_id=chat_id,
-        state=state,
+    await _render_history_via_callback(
+        callback,
+        bot=bot,
         factory=factory,
         client_id=callback_data.scope_id,
         kind=callback_data.kind,
@@ -212,31 +205,22 @@ async def on_history_date(
     try:
         anchor = date.fromisoformat(message.text.strip())
     except ValueError:
-        await advance(
-            bot,
-            chat_id=message.chat.id,
-            state=state,
-            text="Не понял. Попробуй YYYY-MM-DD:",
-            reply_markup=None,
+        await bot.send_message(
+            chat_id=message.chat.id, text="Не понял. Попробуй YYYY-MM-DD:"
         )
         return
     state_data = await state.get_data()
     client_id = state_data.get("history_client_id")
     if client_id is None:
-        await advance(
-            bot,
-            chat_id=message.chat.id,
-            state=state,
-            text="Контекст потерян. Открой /clients заново.",
-            reply_markup=None,
+        await bot.send_message(
+            chat_id=message.chat.id, text="Контекст потерян. Открой /clients заново."
         )
         await state.clear()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    await _render_history(
+    await _render_history_to_chat(
         bot,
         chat_id=message.chat.id,
-        state=state,
         factory=factory,
         client_id=int(client_id),
         kind="date",
@@ -245,16 +229,13 @@ async def on_history_date(
     await state.clear()
 
 
-async def _render_history(
-    bot: Bot,
-    *,
-    chat_id: int,
-    state: FSMContext,
+async def _build_history_payload(
     factory: async_sessionmaker[Any],
+    *,
     client_id: int,
     kind: str,
     anchor: date | None,
-) -> None:
+) -> tuple[str, InlineKeyboardMarkup | None]:
     async with session_scope(factory) as session:
         tz = await settings_service.get_timezone(session)
         today_local = datetime.now(tz=tz).date()
@@ -297,20 +278,13 @@ async def _render_history(
         client = await client_repo.get(client_id)
 
     if client is None:
-        await advance(
-            bot, chat_id=chat_id, state=state,
-            text="Клиент не найден.", reply_markup=None,
-        )
-        return
+        return "Клиент не найден.", None
 
     header_anchor = datetime.combine(anchor, time(0), tzinfo=tz)
-    header = f"{client.name} — {format_period_header(kind, anchor=header_anchor)}"
+    header = f"{_e(client.name)} — {format_period_header(kind, anchor=header_anchor)}"
 
     if not appts:
-        await advance(
-            bot, chat_id=chat_id, state=state, text=f"{header}\n\nЗаписей нет.", reply_markup=None
-        )
-        return
+        return f"{header}\n\nЗаписей нет.", None
 
     pairs = [(appt, client) for appt in appts]
     grouped = group_by_day(pairs, tz=tz)
@@ -330,10 +304,34 @@ async def _render_history(
                 ]
             )
         lines.append("")
-    await advance(
-        bot,
-        chat_id=chat_id,
-        state=state,
-        text="\n".join(lines).rstrip(),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_history_via_callback(
+    callback: CallbackQuery,
+    *,
+    bot: Bot,
+    factory: async_sessionmaker[Any],
+    client_id: int,
+    kind: str,
+    anchor: date | None,
+) -> None:
+    text, kb = await _build_history_payload(
+        factory, client_id=client_id, kind=kind, anchor=anchor
     )
+    await show_in_callback(callback, bot=bot, text=text, reply_markup=kb)
+
+
+async def _render_history_to_chat(
+    bot: Bot,
+    *,
+    chat_id: int,
+    factory: async_sessionmaker[Any],
+    client_id: int,
+    kind: str,
+    anchor: date | None,
+) -> None:
+    text, kb = await _build_history_payload(
+        factory, client_id=client_id, kind=kind, anchor=anchor
+    )
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)

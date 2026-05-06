@@ -13,11 +13,12 @@ data/
 *.sqlite3
 *.sqlite-journal
 
-# Redis dumps
+# Redis dumps + runtime data dir mounted by docker-compose
 dump.rdb
 appendonly.aof
 *.aof
 *.rdb
+redis-data/
 
 # Logs (могут содержать chat_id и фрагменты сообщений)
 logs/

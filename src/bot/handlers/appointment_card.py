@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, cast
@@ -22,7 +23,7 @@ from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.date_shortcut import date_shortcut_kb
 from src.bot.keyboards.time_picker import time_picker_kb
 from src.bot.states import EditAppointment
-from src.bot.ui import advance, finalize
+from src.bot.ui import advance, finalize, show_in_callback
 from src.bot.ui import cancel as ui_cancel
 from src.services import settings_service
 from src.services.formatters import format_date_ru
@@ -34,18 +35,22 @@ log = logging.getLogger(__name__)
 router = Router(name="appointment_card")
 
 
+def _e(value: str | None) -> str:
+    """Escape user-supplied text for HTML parse_mode (issue #1)."""
+    return html.escape(value or "", quote=True)
+
+
 # ---------- view ------------------------------------------------------------
 
 
 @router.callback_query(ApptCD.filter(F.action == "view"))
 async def on_view(
-    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **data: Any
+    callback: CallbackQuery, callback_data: ApptCD, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    chat_id = callback.message.chat.id
     async with session_scope(factory) as session:
         tz = await settings_service.get_timezone(session)
         appt = await AppointmentRepository(session).get(callback_data.appointment_id)
@@ -53,16 +58,16 @@ async def on_view(
             await ClientRepository(session).get(appt.client_id) if appt is not None else None
         )
     if appt is None or client is None:
-        await advance(
-            bot, chat_id=chat_id, state=state, text="Запись не найдена.", reply_markup=None
+        await show_in_callback(
+            callback, bot=bot, text="Запись не найдена.", reply_markup=None
         )
         await callback.answer()
         return
 
     local = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(tz)
-    note = f"📝 {appt.visit_note}\n" if appt.visit_note else ""
+    note = f"📝 {_e(appt.visit_note)}\n" if appt.visit_note else ""
     insta = (
-        f"📷 <a href=\"https://instagram.com/{client.instagram}\">{client.instagram}</a>\n"
+        f"📷 <a href=\"https://instagram.com/{_e(client.instagram)}\">{_e(client.instagram)}</a>\n"
         if client.instagram
         else ""
     )
@@ -71,9 +76,9 @@ async def on_view(
         "done": "✅ Выполнена",
         "cancelled": "❌ Отменена",
     }
-    status_label = status_labels.get(appt.status, appt.status)
+    status_label = status_labels.get(appt.status, _e(appt.status))
     text = (
-        f"<b>{client.name}</b>\n"
+        f"<b>{_e(client.name)}</b>\n"
         f"📅 {format_date_ru(local)}, {local.strftime('%H:%M')}\n"
         f"{insta}{note}{status_label}"
     )
@@ -82,7 +87,9 @@ async def on_view(
         if appt.status == "scheduled"
         else _closed_kb(appt.id)
     )
-    await advance(bot, chat_id=chat_id, state=state, text=text, reply_markup=kb)
+    # show_in_callback edits the clicked message; the wizard's flow_message_id
+    # is left alone (issue #3).
+    await show_in_callback(callback, bot=bot, text=text, reply_markup=kb)
     await callback.answer()
 
 
@@ -116,15 +123,34 @@ async def on_close(callback: CallbackQuery, **_: Any) -> None:
     await callback.answer()
 
 
+# ---------- helpers --------------------------------------------------------
+
+
+async def _load_active(
+    factory: async_sessionmaker[Any], appointment_id: int
+) -> Any | None:
+    """Fetch appointment only if still scheduled. Returns None for missing
+    or non-scheduled rows so callers can refuse the action (issue #4)."""
+    async with session_scope(factory) as session:
+        appt = await AppointmentRepository(session).get(appointment_id)
+    if appt is None or appt.status != "scheduled":
+        return None
+    return appt
+
+
 # ---------- note edit -------------------------------------------------------
 
 
 @router.callback_query(ApptCD.filter(F.action == "note"))
 async def on_note_start(
-    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    if await _load_active(factory, callback_data.appointment_id) is None:
+        await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
     await state.update_data(edit_appointment_id=callback_data.appointment_id)
     await advance(
@@ -154,7 +180,20 @@ async def on_note_text(message: Message, state: FSMContext, bot: Bot, **data: An
         )
         return
     async with session_scope(factory) as session:
-        await AppointmentRepository(session).update_visit_note(int(appt_id), message.text.strip())
+        repo = AppointmentRepository(session)
+        appt = await repo.get(int(appt_id))
+        if appt is None or appt.status != "scheduled":
+            updated = None
+        else:
+            updated = await repo.update_visit_note(int(appt_id), message.text.strip())
+    if updated is None:
+        await finalize(
+            bot,
+            chat_id=message.chat.id,
+            state=state,
+            text="⚠️ Запись не найдена или уже не активна. Изменения не сохранены.",
+        )
+        return
     await finalize(
         bot, chat_id=message.chat.id, state=state, text="✅ Заметка обновлена."
     )
@@ -165,10 +204,14 @@ async def on_note_text(message: Message, state: FSMContext, bot: Bot, **data: An
 
 @router.callback_query(ApptCD.filter(F.action == "cancel"))
 async def on_cancel_start(
-    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    if await _load_active(factory, callback_data.appointment_id) is None:
+        await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
     await state.update_data(cancel_appointment_id=callback_data.appointment_id)
     confirm_kb = InlineKeyboardMarkup(
@@ -213,7 +256,24 @@ async def on_cancel_confirmed(
     factory = cast(async_sessionmaker[Any], data["session_factory"])
     appt_id = int(state_data["cancel_appointment_id"])
     async with session_scope(factory) as session:
-        await AppointmentRepository(session).update_status(appt_id, "cancelled")
+        repo = AppointmentRepository(session)
+        appt = await repo.get(appt_id)
+        if appt is None:
+            updated = None
+        elif appt.status != "scheduled":
+            # Already done/cancelled — refuse silently.
+            updated = None
+        else:
+            updated = await repo.update_status(appt_id, "cancelled")
+    if updated is None:
+        await finalize(
+            bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            text="⚠️ Запись не найдена или уже не активна.",
+        )
+        await callback.answer()
+        return
     await finalize(
         bot, chat_id=callback.message.chat.id, state=state, text="❌ Запись отменена."
     )
@@ -238,10 +298,14 @@ async def on_cancel_aborted(
 
 @router.callback_query(ApptCD.filter(F.action == "move"))
 async def on_move_start(
-    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: ApptCD, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    if await _load_active(factory, callback_data.appointment_id) is None:
+        await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
     await state.update_data(
         edit_appointment_id=callback_data.appointment_id,
@@ -400,6 +464,18 @@ async def on_move_time_picked(
         local_dt = datetime.combine(picked_date, time(int(hh), int(mm)), tzinfo=tz)
         starts_at_utc = local_dt.astimezone(timezone.utc).replace(tzinfo=None)
         repo = AppointmentRepository(session)
+        # Re-check status before write — appointment may have been cancelled
+        # between move-start and now (issue #4).
+        existing = await repo.get(appt_id)
+        if existing is None or existing.status != "scheduled":
+            await finalize(
+                bot,
+                chat_id=chat_id,
+                state=state,
+                text="⚠️ Запись не найдена или уже не активна.",
+            )
+            await callback.answer()
+            return
         overlap = await repo.find_overlap(
             starts_at=starts_at_utc, duration_min=duration, exclude_id=appt_id
         )
@@ -412,6 +488,14 @@ async def on_move_time_picked(
             )
             await callback.answer()
             return
-        await repo.reschedule(appt_id, starts_at=starts_at_utc, duration_min=duration)
+        rescheduled = await repo.reschedule(
+            appt_id, starts_at=starts_at_utc, duration_min=duration
+        )
+    if rescheduled is None:
+        await finalize(
+            bot, chat_id=chat_id, state=state, text="⚠️ Запись не найдена."
+        )
+        await callback.answer()
+        return
     await finalize(bot, chat_id=chat_id, state=state, text="✅ Перенесено.")
     await callback.answer()

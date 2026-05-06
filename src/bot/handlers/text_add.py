@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import html
 from typing import Any, cast
 
 from aiogram import Bot, Router
@@ -78,11 +79,14 @@ async def handle_add(
         visit_note=parsed.visit_note,
     )
 
-    insta = f"📷 {client_insta}\n" if client_insta else ""
-    note_line = f"📝 {parsed.visit_note}\n" if parsed.visit_note else ""
+    def _e(value: str | None) -> str:
+        return html.escape(value or "", quote=True)
+
+    insta = f"📷 {_e(client_insta)}\n" if client_insta else ""
+    note_line = f"📝 {_e(parsed.visit_note)}\n" if parsed.visit_note else ""
     text = (
         "Записываю:\n"
-        f"👤 {client_name}\n"
+        f"👤 {_e(client_name)}\n"
         f"📅 {format_date_ru(parsed.starts_at)}, {parsed.starts_at.strftime('%H:%M')}\n"
         f"{insta}{note_line}".rstrip()
     )

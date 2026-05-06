@@ -8,6 +8,7 @@ Conflict-check is layered on top via find_overlap (Task 9c covers it).
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, cast
@@ -420,11 +421,15 @@ async def _show_confirm(
     picked_date = date.fromisoformat(state_data["picked_date"])
     picked_time_str = state_data["picked_time"]
     visit_note = state_data.get("visit_note")
-    insta = f"📷 {client.instagram}\n" if client.instagram else ""
-    note_line = f"📝 {visit_note}\n" if visit_note else ""
+
+    def _e(value: str | None) -> str:
+        return html.escape(value or "", quote=True)
+
+    insta = f"📷 {_e(client.instagram)}\n" if client.instagram else ""
+    note_line = f"📝 {_e(visit_note)}\n" if visit_note else ""
     text = (
         "Записываю:\n"
-        f"👤 {client.name}\n"
+        f"👤 {_e(client.name)}\n"
         f"📅 {format_date_ru(datetime.combine(picked_date, time(0)))}, {picked_time_str}\n"
         f"{insta}{note_line}".rstrip()
     )
@@ -465,7 +470,7 @@ async def on_save(
                     appt.starts_at + timedelta(minutes=appt.duration_min)
                 ).replace(tzinfo=timezone.utc).astimezone(tz)
                 lines.append(
-                    f"• {conflict_client.name}, "
+                    f"• {html.escape(conflict_client.name)}, "
                     f"{local_starts.strftime('%H:%M')}–{local_ends.strftime('%H:%M')}"
                 )
             await advance(

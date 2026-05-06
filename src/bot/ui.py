@@ -7,10 +7,36 @@ import logging
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 log = logging.getLogger(__name__)
 CANCELLED_TEXT = "❌ Отменено"
+
+
+async def show_in_callback(
+    callback: CallbackQuery,
+    *,
+    bot: Bot,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None,
+) -> None:
+    """Edit the message the user clicked, or send a new one if edit fails.
+
+    Use this for *view-only* handlers (open card, show history) that must NOT
+    touch the wizard's flow_message_id. The edit hits exactly the message the
+    button lived on, so an active wizard in the same chat is unaffected.
+    """
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_text(text=text, reply_markup=reply_markup)
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            log.warning("show_in_callback edit failed (%s); sending new", exc)
+    if msg is not None:
+        await bot.send_message(chat_id=msg.chat.id, text=text, reply_markup=reply_markup)
 
 
 async def advance(
