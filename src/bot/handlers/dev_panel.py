@@ -11,10 +11,10 @@ notification pipeline without waiting for real-world fire times:
                                  Bypasses APScheduler.
 
     /dev_test_after <minutes>  — take the nearest future scheduled appointment,
-                                 attach an `offset_before <minutes>m` override,
-                                 and reschedule. Real APScheduler job fires
-                                 in <minutes> minutes — exercises the full
-                                 cycle (queue → fire → send → mark_sent).
+                                 replace its rules with one that fires in
+                                 <minutes> minutes from now, and reschedule.
+                                 Exercises the full cycle (queue → fire →
+                                 send → mark_sent).
 
 DELETE THIS FILE plus its include_router line in main.py to remove
 the panel. Nothing else touches it.
@@ -45,7 +45,6 @@ from src.storage.repositories.appointment_notify_overrides import (
 )
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
-from src.storage.repositories.notify_rules import NotifyRuleRepository
 
 log = logging.getLogger(__name__)
 router = Router(name="dev_panel")
@@ -145,29 +144,28 @@ async def handle_test_after(
             return
         appointment_id = appt.id
         starts_at_utc = appt.starts_at
-        # The offset rule must yield a fire_at in the future; if minutes is
-        # bigger than time-until-appt, plan_jobs would drop it.
-        target_fire_utc = starts_at_utc - timedelta(minutes=minutes)
-        if target_fire_utc <= now_utc:
+        # We want fire_at = now + minutes (independent of how far the
+        # appointment is). offset_before is computed relative to the
+        # appointment, so: offset = starts - (now + minutes).
+        target_fire_utc = now_utc + timedelta(minutes=minutes)
+        offset_seconds = (starts_at_utc - target_fire_utc).total_seconds()
+        offset_minutes = int(offset_seconds // 60)
+        if offset_minutes < 1:
             await bot.send_message(
                 chat_id=message.chat.id,
                 text=(
-                    "🚧 dev: запись слишком близко — fire_at окажется в прошлом. "
-                    "Возьми меньшее N (или запись подальше)."
+                    f"🚧 dev: ближайшая запись меньше чем через {minutes} мин — "
+                    "fire_at оказался бы в прошлом. Возьми меньшее N."
                 ),
             )
             return
-        # Materialise existing rules into the override table, then add ours.
+        # Replace any prior overrides with just our test rule. This isolates
+        # the test fire from the global day-before / 60-min pings (otherwise
+        # we'd queue extra notifications and create noise).
         repo = AppointmentNotifyOverrideRepository(session)
-        existing = await repo.list_for_appointment(appointment_id)
-        if not existing:
-            globals_ = await NotifyRuleRepository(session).list_all()
-            await repo.replace_all(
-                appointment_id,
-                [(r.kind, r.value, r.enabled) for r in globals_],
-            )
-        await repo.add_one(
-            appointment_id, kind="offset_before", value=f"{minutes}m", enabled=True
+        await repo.replace_all(
+            appointment_id,
+            [("offset_before", f"{offset_minutes}m", True)],
         )
 
     async with session_scope(factory) as session:
@@ -186,8 +184,8 @@ async def handle_test_after(
     await bot.send_message(
         chat_id=message.chat.id,
         text=(
-            f"🚧 dev: добавлено правило <code>offset_before {minutes}m</code> "
-            f"к записи #{appointment_id}.\n"
+            f"🚧 dev: переопределил правила записи #{appointment_id} на "
+            f"<code>offset_before {offset_minutes}m</code>.\n"
             f"Ожидаем пинг в {fire_in_local.strftime('%H:%M:%S')} "
             f"(через ≈{minutes} мин)."
         ),
