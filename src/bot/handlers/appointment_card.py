@@ -27,6 +27,10 @@ from src.bot.ui import advance, finalize, show_in_callback
 from src.bot.ui import cancel as ui_cancel
 from src.services import settings_service
 from src.services.formatters import format_date_ru
+from src.services.notifications import (
+    cancel_for_appointment,
+    reschedule_for_appointment,
+)
 from src.storage.db import session_scope
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
@@ -282,6 +286,11 @@ async def on_cancel_confirmed(
         )
         await callback.answer()
         return
+    # Drop notifications for this appointment.
+    async with session_scope(factory) as session:
+        await cancel_for_appointment(
+            session, scheduler=data.get("scheduler"), appointment_id=appt_id
+        )
     await finalize(
         bot, chat_id=callback.message.chat.id, state=state, text="❌ Запись отменена."
     )
@@ -507,5 +516,13 @@ async def on_move_time_picked(
         )
         await callback.answer()
         return
+    # Recompute notifications for the new starts_at.
+    async with session_scope(factory) as session:
+        await reschedule_for_appointment(
+            session,
+            scheduler=data.get("scheduler"),
+            appointment_id=appt_id,
+            job_runner=data.get("notify_runner"),
+        )
     await finalize(bot, chat_id=chat_id, state=state, text="✅ Перенесено.")
     await callback.answer()

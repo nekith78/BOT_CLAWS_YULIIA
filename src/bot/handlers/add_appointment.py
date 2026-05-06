@@ -41,6 +41,7 @@ from src.bot.states import AddAppointment
 from src.bot.ui import advance, cancel, finalize
 from src.services import settings_service
 from src.services.formatters import format_date_ru
+from src.services.notifications import reschedule_for_appointment
 from src.storage.db import session_scope
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
@@ -587,11 +588,21 @@ async def on_save(
             await callback.answer()
             return
 
-        await repo.create(
+        new_appt = await repo.create(
             client_id=state_data["client_id"],
             starts_at=starts_at_utc,
             duration_min=duration,
             visit_note=state_data.get("visit_note"),
+        )
+        new_appt_id = new_appt.id
+    # Schedule notifications in a fresh session — `repo.create`'s scope is
+    # already closed by the time we call this.
+    async with session_scope(factory) as session:
+        await reschedule_for_appointment(
+            session,
+            scheduler=data.get("scheduler"),
+            appointment_id=new_appt_id,
+            job_runner=data.get("notify_runner"),
         )
     await finalize(bot, chat_id=chat_id, state=state, text="✅ Запись сохранена.")
     await callback.answer()
@@ -645,13 +656,23 @@ async def on_force_save(
     state_data = await state.get_data()
     starts_at_utc, duration, _ = await _resolve_starts_at(factory, state_data)
     async with session_scope(factory) as session:
-        await AppointmentRepository(session).create(
+        new_appt = await AppointmentRepository(session).create(
             client_id=state_data["client_id"],
             starts_at=starts_at_utc,
             duration_min=duration,
             visit_note=state_data.get("visit_note"),
         )
-    await finalize(bot, chat_id=chat_id, state=state, text="✅ Запись сохранена (с пересечением).")
+        new_appt_id = new_appt.id
+    async with session_scope(factory) as session:
+        await reschedule_for_appointment(
+            session,
+            scheduler=data.get("scheduler"),
+            appointment_id=new_appt_id,
+            job_runner=data.get("notify_runner"),
+        )
+    await finalize(
+        bot, chat_id=chat_id, state=state, text="✅ Запись сохранена (с пересечением)."
+    )
     await callback.answer()
 
 

@@ -81,3 +81,8 @@ warn_unused_ignores = true
 warn_return_any = true
 disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# apscheduler ships no py.typed marker / stubs as of 3.10.x.
+module = ["apscheduler.*"]
+ignore_missing_imports = true
