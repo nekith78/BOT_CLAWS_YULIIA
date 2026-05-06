@@ -15,14 +15,14 @@ def _label_for(client: Client, ordinal_by_id: dict[int, int]) -> str:
     """Display label rule:
     - has instagram → always "Имя (@insta)"
     - no instagram, name unique in this picker → "Имя"
-    - no instagram, name duplicated in this picker → "Имя-N" (1-based, by id asc)
+    - no instagram, name duplicated in this picker → "Имя #N" (1-based, by id asc)
     """
     if client.instagram:
         return f"{client.name} (@{client.instagram})"
     ordinal = ordinal_by_id.get(client.id)
     if ordinal is None:
         return client.name
-    return f"{client.name}-{ordinal}"
+    return f"{client.name} #{ordinal}"
 
 
 def _build_ordinals(clients: list[Client]) -> dict[int, int]:

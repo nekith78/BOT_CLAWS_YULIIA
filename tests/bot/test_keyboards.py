@@ -126,9 +126,9 @@ class TestClientPicker:
         ]
         kb = client_picker_kb(recent=clients)
         texts = [b.text for row in kb.inline_keyboard for b in row]
-        # Older id (5) → -1, newer id (8) → -2
-        assert "Олег-1" in texts
-        assert "Олег-2" in texts
+        # Older id (5) → #1, newer id (8) → #2
+        assert "Олег #1" in texts
+        assert "Олег #2" in texts
 
     def test_duplicate_names_one_with_instagram(self) -> None:
         # If one of the dupes has instagram, only the other(s) might still
@@ -140,7 +140,7 @@ class TestClientPicker:
         kb = client_picker_kb(recent=clients)
         texts = [b.text for row in kb.inline_keyboard for b in row]
         assert "Олег (@oleg_a)" in texts
-        # Only one Олег without instagram → label stays "Олег" (no -1 suffix)
+        # Only one Олег without instagram → label stays "Олег" (no #1 suffix)
         assert "Олег" in texts
 
     def test_duplicate_names_both_with_different_instagrams(self) -> None:
@@ -161,8 +161,8 @@ class TestClientPicker:
         kb = client_picker_kb(recent=clients)
         texts = [b.text for row in kb.inline_keyboard for b in row]
         # Case-insensitive grouping → both get suffix
-        assert "Олег-1" in texts
-        assert "ОЛЕГ-2" in texts
+        assert "Олег #1" in texts
+        assert "ОЛЕГ #2" in texts
 
 
 class TestConfirmKb:
