@@ -8,6 +8,9 @@ Design notes:
 - Compact, action-first phrasing — empirically Gemini Flash starts
   refusing tool calls when the prompt over-emphasises «don't call».
 - The LLM must never produce a regular reply. Only tool-call or silence.
+- Optional `recent_turns` list seeds the LLM with the last few user
+  turns + what each turn picked, so follow-ups like «удали эту запись»
+  resolve naturally.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ def build_system_prompt(
     *,
     now_local: datetime,
     tz: str,
-    context_snapshot: dict[str, Any] | None = None,
+    recent_turns: list[dict[str, Any]] | None = None,
 ) -> str:
     weekday = _WEEKDAYS_RU[now_local.weekday()]
     today_iso = now_local.date().isoformat()
@@ -72,34 +75,44 @@ def build_system_prompt(
 Если в одной фразе несколько действий («запиши X и Y одновременно») —
 вызови tool для первого, второе пользователь повторит.
 """
-    if context_snapshot:
-        return base + _render_context(context_snapshot)
+    if recent_turns:
+        return base + _render_recent(recent_turns)
     return base
 
 
-def _render_context(snapshot: dict[str, Any]) -> str:
-    items = snapshot.get("appointments") or []
-    if not items:
-        return ""
+def _render_recent(turns: list[dict[str, Any]]) -> str:
+    """Render the last few user turns into a compact context block.
+
+    Each turn carries the user's exact text, the tool the LLM picked
+    (or None), the args it filled, and — for list-style results — a
+    snapshot of what the bot showed. The LLM uses this to resolve
+    «эту запись», «ту», «первую», «последнюю» without us having to
+    add appointment_id fields to every action's schema.
+    """
     lines = [
         "",
-        "КОНТЕКСТ предыдущего ответа (бот недавно показал пользователю эти "
-        "записи; используй ТОЛЬКО если пользователь ссылается выражениями "
-        "«эту запись», «ту», «первую», «последнюю», «удали запись» без "
-        "уточнения чьей):",
+        "НЕДАВНИЕ команды (последние 3 — для разрешения ссылок «эту», "
+        "«ту», «первую», «последнюю»; если новая команда самодостаточна — "
+        "игнорируй):",
     ]
-    for idx, item in enumerate(items, start=1):
-        client = item.get("client_name") or "?"
-        date_iso = item.get("date") or "?"
-        time_hhmm = item.get("time") or "?"
-        note = item.get("note")
-        suffix = f" — {note}" if note else ""
-        lines.append(
-            f"{idx}. {client} — {date_iso} {time_hhmm}{suffix}"
-        )
-    lines.append(
-        "Когда пользователь ссылается на одну из этих записей — подставь её "
-        "client_name + date + time в аргументы tool. Если ссылка двусмысленна, "
-        "бери первую — бот сам спросит уточнение если что."
-    )
+    for idx, turn in enumerate(turns, start=1):
+        user_text = (turn.get("user_text") or "").strip()
+        tool = turn.get("tool_name") or "—"
+        args = turn.get("args") or {}
+        snapshot = turn.get("snapshot") or {}
+
+        line = f'{idx}. "{user_text}" → {tool}'
+        if args:
+            args_str = ", ".join(f"{k}={v}" for k, v in args.items() if v not in (None, "", []))
+            if args_str:
+                line += f"({args_str})"
+
+        appts = snapshot.get("appointments") if isinstance(snapshot, dict) else None
+        if appts:
+            shown = "; ".join(
+                f"{a.get('client_name', '?')} {a.get('date', '?')} {a.get('time', '?')}"
+                for a in appts[:5]
+            )
+            line += f" → показал: {shown}"
+        lines.append(line)
     return "\n".join(lines) + "\n"

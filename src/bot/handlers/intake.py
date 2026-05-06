@@ -17,7 +17,8 @@ from __future__ import annotations
 import io
 import logging
 import uuid
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from aiogram import Bot, F, Router
@@ -61,35 +62,39 @@ _RESERVED_TEXT_BUTTONS = {
 }
 
 
-# In-memory short-term «what did the bot just show» memory keyed by chat_id.
-# Stored: {"snapshot": dict, "saved_at_utc": datetime}. TTL 10 min.
-# A bot restart wipes it — that's fine; context is anyway about the last
-# ~minute of conversation, not long-term state.
-_INTAKE_CONTEXT_TTL_SEC = 600
-_INTAKE_CONTEXT: dict[int, dict[str, Any]] = {}
+# In-memory short-term conversational history keyed by chat_id — last 3
+# user turns. A turn = `{user_text, tool_name, args, snapshot, timestamp}`.
+# Replayed into the system prompt so the LLM can resolve follow-ups like
+# «удали эту запись», «отмени последнюю». Per-turn TTL 10 min; bot restart
+# wipes the deque (acceptable — context is conversational not durable).
+_RECENT_TURNS_MAX = 3
+_RECENT_TURNS_TTL_SEC = 600
+_RECENT_TURNS: dict[int, deque[dict[str, Any]]] = {}
 
 
-def _save_context(chat_id: int, snapshot: dict[str, Any]) -> None:
-    _INTAKE_CONTEXT[chat_id] = {
-        "snapshot": snapshot,
-        "saved_at_utc": datetime.now(tz=timezone.utc),
-    }
+def _push_turn(chat_id: int, turn: dict[str, Any]) -> None:
+    queue = _RECENT_TURNS.setdefault(
+        chat_id, deque(maxlen=_RECENT_TURNS_MAX)
+    )
+    queue.append(turn)
 
 
-def _get_context(chat_id: int) -> dict[str, Any] | None:
-    entry = _INTAKE_CONTEXT.get(chat_id)
-    if entry is None:
-        return None
-    age = (datetime.now(tz=timezone.utc) - entry["saved_at_utc"]).total_seconds()
-    if age > _INTAKE_CONTEXT_TTL_SEC:
-        _INTAKE_CONTEXT.pop(chat_id, None)
-        return None
-    snapshot = entry["snapshot"]
-    return snapshot if isinstance(snapshot, dict) else None
+def _get_recent_turns(chat_id: int) -> list[dict[str, Any]]:
+    queue = _RECENT_TURNS.get(chat_id)
+    if not queue:
+        return []
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=_RECENT_TURNS_TTL_SEC)
+    fresh = [t for t in queue if t.get("timestamp") and t["timestamp"] >= cutoff]
+    if len(fresh) != len(queue):
+        # Drop stale entries from the head.
+        queue.clear()
+        for t in fresh:
+            queue.append(t)
+    return list(queue)
 
 
-def _clear_context(chat_id: int) -> None:
-    _INTAKE_CONTEXT.pop(chat_id, None)
+def _clear_recent(chat_id: int) -> None:
+    _RECENT_TURNS.pop(chat_id, None)
 
 
 # Lazy registry init — first import.
@@ -271,7 +276,7 @@ async def _dispatch(
         prompt = build_system_prompt(
             now_local=now_local,
             tz=settings.owner_tz,
-            context_snapshot=_get_context(chat_id),
+            recent_turns=_get_recent_turns(chat_id),
         )
 
         try:
@@ -309,6 +314,19 @@ async def _dispatch(
         )
         response = await action.plan(ctx, parsed.args)
 
+    # Record this turn before rendering — even FAIL/CONFIRM responses are
+    # part of the conversation history the LLM should see next time.
+    _push_turn(
+        chat_id,
+        {
+            "user_text": transcript,
+            "tool_name": parsed.tool_name,
+            "args": dict(parsed.args),
+            "snapshot": response.context_snapshot,
+            "timestamp": datetime.now(tz=timezone.utc),
+        },
+    )
+
     # Render outside the session — render needs no DB.
     await _render(
         bot=bot,
@@ -332,8 +350,6 @@ async def _render(
     status_msg_id: int,
 ) -> None:
     if response.result is ActionResult.EXECUTED:
-        if response.context_snapshot is not None:
-            _save_context(chat_id, response.context_snapshot)
         await _replace_status(
             bot, chat_id, status_msg_id, response.text,
             reply_markup=response.keyboard,
@@ -476,9 +492,6 @@ async def on_confirm(
         response = await action.execute(ctx, payload)
 
     await state.clear()
-    # Mutating action just ran — any prior «what was shown» context is stale.
-    if response.result is ActionResult.EXECUTED:
-        _clear_context(chat_id)
     await _replace_status(
         bot, chat_id, msg_id, response.text, reply_markup=response.keyboard
     )
