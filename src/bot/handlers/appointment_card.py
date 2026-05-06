@@ -17,10 +17,21 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.bot.callback_data import ApptCD, CalendarCD, DateShortcutCD, TimeCD, WizardCD
+from src.bot.callback_data import (
+    ApptCD,
+    CalendarCD,
+    DateShortcutCD,
+    TimeCD,
+    TimePartCD,
+    WizardCD,
+)
 from src.bot.keyboards.appointment_card import appointment_card_kb
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.date_shortcut import date_shortcut_kb
+from src.bot.keyboards.time_part_picker import (
+    time_hour_picker_kb,
+    time_minute_picker_kb,
+)
 from src.bot.keyboards.time_picker import time_picker_kb
 from src.bot.states import EditAppointment
 from src.bot.ui import advance, finalize, show_in_callback
@@ -466,21 +477,105 @@ async def on_move_time_picked(
     if callback.message is None:
         await callback.answer()
         return
+    chat_id = callback.message.chat.id
     if callback_data.hhmm == "custom":
-        # For simplicity require fixed grid for moves; "custom" not yet supported here.
-        await callback.answer("Используй сетку времени.", show_alert=True)
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+        await callback.answer()
+        return
+    hh, mm = callback_data.hhmm.split(":")
+    await _save_move(
+        bot,
+        callback=callback,
+        state=state,
+        data=data,
+        hh=int(hh),
+        mm=int(mm),
+    )
+
+
+@router.callback_query(EditAppointment.choosing_new_time, TimePartCD.filter())
+async def on_move_time_part(
+    callback: CallbackQuery,
+    callback_data: TimePartCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    chat_id = callback.message.chat.id
+    action = callback_data.action
+
+    if action == "hour":
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text=f"Минуты для {callback_data.hh:02d}:__",
+            reply_markup=time_minute_picker_kb(hh=callback_data.hh),
+        )
+        await callback.answer()
+        return
+    if action == "minute":
+        await _save_move(
+            bot,
+            callback=callback,
+            state=state,
+            data=data,
+            hh=callback_data.hh,
+            mm=callback_data.mm,
+        )
+        return
+    if action == "back_to_hours":
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+    elif action == "back_to_grid":
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text="Во сколько?",
+            reply_markup=time_picker_kb(),
+        )
+    await callback.answer()
+
+
+async def _save_move(
+    bot: Bot,
+    *,
+    callback: CallbackQuery,
+    state: FSMContext,
+    data: dict[str, Any],
+    hh: int,
+    mm: int,
+) -> None:
+    """Commit the picked HH:MM as the appointment's new time, with overlap
+    check and notification rescheduling. Used by both the 30-min grid and
+    the two-step custom picker."""
+    if callback.message is None:
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
     chat_id = callback.message.chat.id
     state_data = await state.get_data()
     appt_id = int(state_data["edit_appointment_id"])
     picked_date = date.fromisoformat(state_data["picked_date"])
-    hh, mm = callback_data.hhmm.split(":")
 
     async with session_scope(factory) as session:
         tz = await settings_service.get_timezone(session)
         duration = await settings_service.get_default_duration_min(session)
-        local_dt = datetime.combine(picked_date, time(int(hh), int(mm)), tzinfo=tz)
+        local_dt = datetime.combine(picked_date, time(hh, mm), tzinfo=tz)
         starts_at_utc = local_dt.astimezone(timezone.utc).replace(tzinfo=None)
         repo = AppointmentRepository(session)
         # Re-check status before write — appointment may have been cancelled
@@ -516,7 +611,6 @@ async def on_move_time_picked(
         )
         await callback.answer()
         return
-    # Recompute notifications for the new starts_at.
     async with session_scope(factory) as session:
         await reschedule_for_appointment(
             session,

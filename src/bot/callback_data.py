@@ -34,6 +34,22 @@ class TimeCD(CallbackData, prefix="time", sep="|"):
     hhmm: str                 # "HH:MM" or literal "custom"
 
 
+class TimePartCD(CallbackData, prefix="tpart", sep="|"):
+    """Two-step HH:MM picker invoked from "Другое время" — first hour, then
+    minute (5-min step). Used in both AddAppointment and EditAppointment.
+
+    - action="hour":           hh is the picked hour (show minute grid for hh)
+    - action="minute":         hh+mm is the final pick (commit and advance)
+    - action="back_to_hours":  return from minute grid to hour grid
+    - action="back_to_grid":   return from hour grid to the main 30-min grid
+    """
+
+    v: int = 1
+    action: Literal["hour", "minute", "back_to_hours", "back_to_grid"]
+    hh: int = 0
+    mm: int = 0
+
+
 class PeriodCD(CallbackData, prefix="period", sep="|"):
     v: int = 1
     kind: Literal["today", "tomorrow", "week", "month", "all", "date"]

@@ -30,12 +30,17 @@ from src.bot.callback_data import (
     ClientCD,
     DateShortcutCD,
     TimeCD,
+    TimePartCD,
     WizardCD,
 )
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.client_picker import SEARCH_SENTINEL, client_picker_kb
 from src.bot.keyboards.confirm import confirm_kb
 from src.bot.keyboards.date_shortcut import date_shortcut_kb
+from src.bot.keyboards.time_part_picker import (
+    time_hour_picker_kb,
+    time_minute_picker_kb,
+)
 from src.bot.keyboards.time_picker import time_picker_kb
 from src.bot.states import AddAppointment
 from src.bot.ui import advance, cancel, finalize
@@ -420,32 +425,57 @@ async def on_time_picked(
             bot,
             chat_id=chat_id,
             state=state,
-            text="Введи время в формате HH:MM:",
-            reply_markup=None,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
         )
-        await state.set_state(AddAppointment.entering_time)
+        # state stays at choosing_time — the hour/minute screens reuse it
     else:
         await _save_time_and_advance(bot, chat_id=chat_id, state=state, hhmm=callback_data.hhmm)
     await callback.answer()
 
 
-@router.message(AddAppointment.entering_time, F.text)
-async def on_time_text(message: Message, state: FSMContext, bot: Bot, **_: Any) -> None:
-    if message.text is None:
+@router.callback_query(AddAppointment.choosing_time, TimePartCD.filter())
+async def on_time_part(
+    callback: CallbackQuery,
+    callback_data: TimePartCD,
+    state: FSMContext,
+    bot: Bot,
+    **_: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
         return
-    raw = message.text.strip()
-    try:
-        time.fromisoformat(raw if len(raw) == 5 else raw + ":00")
-    except ValueError:
+    chat_id = callback.message.chat.id
+    action = callback_data.action
+
+    if action == "hour":
         await advance(
             bot,
-            chat_id=message.chat.id,
+            chat_id=chat_id,
             state=state,
-            text="Не понял. Попробуй HH:MM (например 14:30):",
-            reply_markup=None,
+            text=f"Минуты для {callback_data.hh:02d}:__",
+            reply_markup=time_minute_picker_kb(hh=callback_data.hh),
         )
-        return
-    await _save_time_and_advance(bot, chat_id=message.chat.id, state=state, hhmm=raw[:5])
+    elif action == "minute":
+        hhmm = f"{callback_data.hh:02d}:{callback_data.mm:02d}"
+        await _save_time_and_advance(bot, chat_id=chat_id, state=state, hhmm=hhmm)
+    elif action == "back_to_hours":
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+    elif action == "back_to_grid":
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text="Во сколько?",
+            reply_markup=time_picker_kb(),
+        )
+    await callback.answer()
 
 
 async def _save_time_and_advance(
