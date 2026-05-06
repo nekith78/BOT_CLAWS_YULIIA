@@ -41,3 +41,4 @@ class ListsFilter(StatesGroup):
 
 class BrowseClients(StatesGroup):
     searching = State()
+    confirming_delete = State()

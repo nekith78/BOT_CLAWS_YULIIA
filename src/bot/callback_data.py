@@ -18,7 +18,7 @@ class ApptCD(CallbackData, prefix="appt", sep="|"):
 
 class ClientCD(CallbackData, prefix="client", sep="|"):
     v: int = 1
-    action: Literal["pick", "view", "edit", "history", "new"]
+    action: Literal["pick", "view", "edit", "history", "new", "delete"]
     client_id: int = 0
 
 

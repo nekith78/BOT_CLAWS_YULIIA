@@ -188,6 +188,35 @@ async def test_list_for_client_filters_by_window(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_client_cascades_to_appointments(session: AsyncSession) -> None:
+    """Deleting a Client must cascade-delete their Appointments (FK ON DELETE
+    CASCADE in the schema). Verifies the policy the UX relies on:
+    'удалить клиента' = клиент + все его записи исчезают."""
+    from sqlalchemy import select
+
+    from src.storage.models import Appointment
+
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="Тест")
+    await session.flush()
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 6, 10))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 14))
+    client_id = client.id
+
+    ok = await clients.delete(client_id)
+    assert ok is True
+    await session.commit()
+    # Bypass identity map: query directly. Cascade DELETE in SQLite is a
+    # DB-level event, the row is gone even if the session held a stale copy.
+    result = await session.execute(
+        select(Appointment).where(Appointment.client_id == client_id)
+    )
+    assert result.scalars().all() == []
+    assert await clients.get(client_id) is None
+
+
+@pytest.mark.asyncio
 async def test_list_for_client_excludes_cancelled_by_default(session: AsyncSession) -> None:
     clients = ClientRepository(session)
     appts = AppointmentRepository(session)
