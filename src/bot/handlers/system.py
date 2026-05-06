@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ErrorEvent, Message
@@ -41,6 +41,18 @@ async def handle_cancel(message: Message, state: FSMContext, bot: Bot) -> None:
 @router.message(Command("help"))
 async def handle_help(message: Message, bot: Bot) -> None:
     await bot.send_message(chat_id=message.chat.id, text=HELP_TEXT)
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def handle_settings_stub(message: Message, bot: Bot) -> None:
+    """Placeholder — full /settings UI lands in Plan #3 (Notifications)."""
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=(
+            "🚧 Раздел в работе — появится в следующем этапе (Notifications).\n"
+            "Сейчас доступны: создание/перенос/отмена записей, списки, история клиента."
+        ),
+    )
 
 
 @router.errors()
