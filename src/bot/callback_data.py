@@ -76,6 +76,27 @@ class SettingsCD(CallbackData, prefix="settings", sep="|"):
     action: Literal["notifications", "timezone"]
 
 
+class IntakeCD(CallbackData, prefix="intake", sep="|"):
+    """Voice/text intake confirm-card and disambiguation buttons.
+
+    - action="confirm": user pressed ✅ — execute the pending action.
+    - action="edit":    user pressed ✏️ Изменить — handoff into the
+                        AddAppointment FSM with pre-filled fields.
+    - action="cancel":  user pressed ❌ — drop pending state with
+                        «❌ Отменено».
+    - action="clarify": user picked one disambiguation option — `tag`
+                        plus `index` identify the chosen option.
+
+    `tag` is a short id for the pending action stashed in FSM data; it
+    binds the keyboard click to the right server-side state.
+    """
+
+    v: int = 1
+    action: Literal["confirm", "edit", "cancel", "clarify"]
+    tag: str = ""
+    index: int = 0
+
+
 class NotifyRuleCD(CallbackData, prefix="nr", sep="|"):
     """Per-appointment notification settings.
 
