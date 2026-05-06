@@ -22,11 +22,7 @@ def test_main_menu_has_required_buttons() -> None:
     assert isinstance(kb, ReplyKeyboardMarkup)
 
     labels = {btn.text for row in kb.keyboard for btn in row}
-    assert "+ Запись" in labels
-    assert "📅 Сегодня" in labels
-    assert "📆 Завтра" in labels
-    assert "👥 Клиенты" in labels
-    assert "⚙️ Настройки" in labels
+    assert labels == {"+ Запись", "📋 Записи", "👥 Клиенты", "⚙️ Настройки"}
 
 
 class TestCalendarKb:

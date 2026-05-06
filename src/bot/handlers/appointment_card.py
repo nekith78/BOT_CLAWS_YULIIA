@@ -152,13 +152,13 @@ async def on_note_start(
     if await _load_active(factory, callback_data.appointment_id) is None:
         await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
+    # Re-anchor the wizard's flow_message to THIS card (the one the user
+    # clicked), not whatever stale id might be left in state.
+    if isinstance(callback.message, Message):
+        await state.update_data(flow_message_id=callback.message.message_id)
     await state.update_data(edit_appointment_id=callback_data.appointment_id)
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        text="Новая заметка:",
-        reply_markup=None,
+    await show_in_callback(
+        callback, bot=bot, text="Новая заметка:", reply_markup=None
     )
     await state.set_state(EditAppointment.entering_note)
     await callback.answer()
@@ -216,6 +216,9 @@ async def on_cancel_start(
     if active is None:
         await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
+    # Re-anchor the wizard's flow_message to THIS card.
+    if isinstance(callback.message, Message):
+        await state.update_data(flow_message_id=callback.message.message_id)
     await state.update_data(cancel_appointment_id=callback_data.appointment_id)
     confirm_kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -231,10 +234,9 @@ async def on_cancel_start(
             ]
         ]
     )
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
+    await show_in_callback(
+        callback,
+        bot=bot,
         text="Точно отменяем эту запись?",
         reply_markup=confirm_kb,
     )
@@ -313,14 +315,16 @@ async def on_move_start(
     if await _load_active(factory, callback_data.appointment_id) is None:
         await callback.answer("Эта запись уже не активна.", show_alert=True)
         return
+    # Re-anchor the wizard's flow_message to THIS card.
+    if isinstance(callback.message, Message):
+        await state.update_data(flow_message_id=callback.message.message_id)
     await state.update_data(
         edit_appointment_id=callback_data.appointment_id,
         cancel_confirm=False,
     )
-    await advance(
-        bot,
-        chat_id=callback.message.chat.id,
-        state=state,
+    await show_in_callback(
+        callback,
+        bot=bot,
         text="Новая дата:",
         reply_markup=date_shortcut_kb(),
     )

@@ -35,5 +35,9 @@ class HistoryFilter(StatesGroup):
     entering_date = State()
 
 
+class ListsFilter(StatesGroup):
+    entering_date = State()
+
+
 class BrowseClients(StatesGroup):
     searching = State()

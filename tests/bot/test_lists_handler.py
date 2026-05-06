@@ -50,8 +50,9 @@ async def test_today_empty(
     await handle_today(_msg(), bot=bot, session_factory=session_factory)
 
     bot.send_message.assert_awaited_once()
-    assert "сегодня" in bot.send_message.await_args.kwargs["text"].lower()
-    assert "записей нет" in bot.send_message.await_args.kwargs["text"]
+    text = bot.send_message.await_args.kwargs["text"].lower()
+    assert "сегодня" in text
+    assert "записей нет" in text
 
 
 async def test_today_with_two_appointments(
