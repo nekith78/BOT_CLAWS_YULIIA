@@ -62,6 +62,15 @@ class TestCalendarKb:
                     return
         raise AssertionError("Did not find button '15'")
 
+    def test_busy_day_gets_count_suffix(self) -> None:
+        kb = calendar_kb(anchor=date(2026, 5, 1), counts={6: 3, 15: 1})
+        texts = {b.text for row in kb.inline_keyboard for b in row}
+        assert "6·3" in texts
+        assert "15·1" in texts
+        # An empty day stays plain
+        assert "20" in texts
+        assert "20·" not in {t for t in texts if t.startswith("20")}
+
 
 class TestTimePicker:
     def test_grid_includes_business_hours(self) -> None:

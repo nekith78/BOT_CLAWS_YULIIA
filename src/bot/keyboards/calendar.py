@@ -28,10 +28,16 @@ _WEEKDAY_HEADER = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 _NOOP = CalendarCD(action="noop").pack()
 
 
-def calendar_kb(*, anchor: date) -> InlineKeyboardMarkup:
+def calendar_kb(
+    *, anchor: date, counts: dict[int, int] | None = None
+) -> InlineKeyboardMarkup:
     """Build a month grid for `anchor.year/anchor.month`. Day cells emit
     `CalendarCD(action="pick", iso_date=YYYY-MM-DD)`. Nav arrows emit
     `CalendarCD(action="nav", nav="prev"|"next", iso_date=anchor.month_first)`.
+
+    If `counts` is provided, days with at least one appointment get a
+    middle-dot suffix with the count: e.g. `15·3` for three appointments
+    on the 15th. Days without appointments stay plain (`15`).
     """
     year, month = anchor.year, anchor.month
     title = f"{_MONTHS_RU[month]} {year}"
@@ -49,9 +55,13 @@ def calendar_kb(*, anchor: date) -> InlineKeyboardMarkup:
                 row.append(InlineKeyboardButton(text=" ", callback_data=_NOOP))
             else:
                 iso = f"{year:04d}-{month:02d}-{day:02d}"
+                if counts and day in counts:
+                    label = f"{day}·{counts[day]}"
+                else:
+                    label = str(day)
                 row.append(
                     InlineKeyboardButton(
-                        text=str(day),
+                        text=label,
                         callback_data=CalendarCD(action="pick", iso_date=iso).pack(),
                     )
                 )

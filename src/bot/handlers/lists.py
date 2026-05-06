@@ -96,11 +96,12 @@ async def on_period_picked(
         async with session_scope(factory) as session:
             tz = await settings_service.get_timezone(session)
         today_local = datetime.now(tz=tz).date()
+        counts = await _counts_for_month(factory, anchor=today_local)
         await show_in_callback(
             callback,
             bot=bot,
             text="Выбери день:",
-            reply_markup=calendar_kb(anchor=today_local),
+            reply_markup=calendar_kb(anchor=today_local, counts=counts),
         )
         await state.set_state(ListsFilter.choosing_date)
         await callback.answer()
@@ -130,7 +131,7 @@ async def on_calendar_pick(
 
 @router.callback_query(ListsFilter.choosing_date, CalendarCD.filter(F.action == "nav"))
 async def on_calendar_nav(
-    callback: CallbackQuery, callback_data: CalendarCD, bot: Bot, **_: Any
+    callback: CallbackQuery, callback_data: CalendarCD, bot: Bot, **data: Any
 ) -> None:
     if callback.message is None:
         await callback.answer()
@@ -138,11 +139,13 @@ async def on_calendar_nav(
     anchor = date.fromisoformat(callback_data.iso_date)
     delta = -1 if callback_data.nav == "prev" else 32
     new_anchor = (anchor + timedelta(days=delta)).replace(day=1)
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    counts = await _counts_for_month(factory, anchor=new_anchor)
     await show_in_callback(
         callback,
         bot=bot,
         text="Выбери день:",
-        reply_markup=calendar_kb(anchor=new_anchor),
+        reply_markup=calendar_kb(anchor=new_anchor, counts=counts),
     )
     await callback.answer()
 
@@ -283,3 +286,30 @@ async def _hydrate(
         if client is not None:
             pairs.append((appt, client))
     return pairs
+
+
+async def _counts_for_month(
+    factory: async_sessionmaker[Any], *, anchor: date
+) -> dict[int, int]:
+    """Return {day_of_month: count} for scheduled appointments in anchor's month
+    (in OWNER_TZ). Used by the calendar picker to label busy days."""
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+        month_first = anchor.replace(day=1)
+        if month_first.month == 12:
+            next_month = month_first.replace(year=month_first.year + 1, month=1)
+        else:
+            next_month = month_first.replace(month=month_first.month + 1)
+        start_local = datetime.combine(month_first, time(0), tzinfo=tz)
+        end_local = datetime.combine(next_month, time(0), tzinfo=tz)
+        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+        appts = await AppointmentRepository(session).list_in_range(
+            start=start_utc, end=end_utc
+        )
+    counts: dict[int, int] = {}
+    for appt in appts:
+        local_date = appt.starts_at.replace(tzinfo=timezone.utc).astimezone(tz).date()
+        if local_date.year == anchor.year and local_date.month == anchor.month:
+            counts[local_date.day] = counts.get(local_date.day, 0) + 1
+    return counts
