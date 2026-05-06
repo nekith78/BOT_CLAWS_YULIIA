@@ -58,4 +58,24 @@ def test_dispatcher_returns_faster_whisper_by_default(
     assert isinstance(stt, FasterWhisperSTT)
 
 
-# openai_whisper dispatcher test added in Task 3 once that provider exists.
+class _FakeAsyncOpenAI:
+    def __init__(self, *, api_key: str) -> None:
+        self.audio = type("A", (), {"transcriptions": None})()
+
+
+def test_dispatcher_returns_openai_whisper_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    from src.config import Settings
+    from src.services.voice.openai_whisper_stt import OpenAIWhisperSTT
+    from src.services.voice.stt import get_stt
+
+    with _env(
+        **_base_env(STT_PROVIDER="openai_whisper", OPENAI_API_KEY="sk-test")
+    ):
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    stt = get_stt(settings)
+    assert isinstance(stt, OpenAIWhisperSTT)
