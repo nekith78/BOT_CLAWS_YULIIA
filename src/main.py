@@ -60,8 +60,9 @@ from src.bot.middlewares.whitelist import WhitelistMiddleware
 from src.config import Settings, ensure_data_dir, load_settings
 from src.services import settings_service
 from src.services.notifications.scheduler import (
+    NOTIFY_RUNNER_PATH,
     build_scheduler,
-    make_job_runner,
+    configure_runner,
     recover_missed_jobs,
 )
 from src.storage import db
@@ -141,12 +142,16 @@ async def run() -> None:
         )
 
         scheduler = build_scheduler(settings.db_url)
-        scheduler.start()
-        notify_runner = make_job_runner(
+        configure_runner(
             bot=bot,
             session_factory=session_factory,
             owner_chat_id=settings.owner_chat_id,
         )
+        scheduler.start()
+        # Notify-runner is stored in the jobstore as a dotted path; APScheduler
+        # resolves it at fire time. The closure-style approach is incompatible
+        # with SQLAlchemyJobStore's pickle requirement.
+        notify_runner = NOTIFY_RUNNER_PATH
 
         try:
             # Catch up on notifications missed while the bot was offline.

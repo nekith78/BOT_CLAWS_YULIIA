@@ -52,41 +52,62 @@ def build_scheduler(db_url: str) -> AsyncIOScheduler:
     return scheduler
 
 
-def make_job_runner(
+# Module-level runner context.
+#
+# SQLAlchemyJobStore needs a picklable callable, so the actual job entry point
+# must be a module-level function. Per-process state (bot client, session
+# factory, owner chat id) is stashed here; `configure_runner` is called once
+# during startup before any job can fire.
+_RUNNER_CONTEXT: dict[str, Any] = {}
+
+NOTIFY_RUNNER_PATH = "src.services.notifications.scheduler:run_notify_job"
+
+
+def configure_runner(
     *,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
     owner_chat_id: int,
-) -> Any:
-    """Return the awaitable APScheduler will invoke at fire_at.
+) -> None:
+    """Bind per-process deps the module-level runner needs at fire time.
 
-    The closure binds the dependencies a job needs at execution time
-    (bot client, DB session factory, owner chat id). Stored in the
-    APScheduler jobstore via reference, so the function path must be
-    importable on restart.
+    Must be called before scheduler.start() handles any job. Single-process
+    design — the bot has only one Bot client and one session factory.
     """
+    _RUNNER_CONTEXT["bot"] = bot
+    _RUNNER_CONTEXT["session_factory"] = session_factory
+    _RUNNER_CONTEXT["owner_chat_id"] = owner_chat_id
 
-    async def _runner(
-        *, appointment_id: int, kind: str, fire_at_utc_iso: str
-    ) -> None:
-        log.info(
-            "notify-job fired: appt=%s kind=%s fire_at=%s",
-            appointment_id, kind, fire_at_utc_iso,
+
+async def run_notify_job(
+    *, appointment_id: int, kind: str, fire_at_utc_iso: str
+) -> None:
+    """APScheduler entry point. Stored in the SQLAlchemy jobstore as the
+    textual reference defined in NOTIFY_RUNNER_PATH so it survives a
+    pickle/unpickle cycle on bot restart.
+    """
+    log.info(
+        "notify-job fired: appt=%s kind=%s fire_at=%s",
+        appointment_id, kind, fire_at_utc_iso,
+    )
+    bot = _RUNNER_CONTEXT.get("bot")
+    session_factory = _RUNNER_CONTEXT.get("session_factory")
+    owner_chat_id = _RUNNER_CONTEXT.get("owner_chat_id")
+    if bot is None or session_factory is None or owner_chat_id is None:
+        log.error("notify-job fired before configure_runner — dropping")
+        return
+    async with session_scope(session_factory) as session:
+        tz = await settings_service.get_timezone(session)
+        await _dispatch_job(
+            session,
+            bot=bot,
+            owner_chat_id=owner_chat_id,
+            tz=tz,
+            appointment_id=appointment_id,
+            kind=kind,
+            fire_at_utc_iso=fire_at_utc_iso,
+            late=False,
         )
-        async with session_scope(session_factory) as session:
-            tz = await settings_service.get_timezone(session)
-            await _dispatch_job(
-                session,
-                bot=bot,
-                owner_chat_id=owner_chat_id,
-                tz=tz,
-                appointment_id=appointment_id,
-                kind=kind,
-                fire_at_utc_iso=fire_at_utc_iso,
-                late=False,
-            )
-
-    return _runner
 
 
 async def _dispatch_job(
