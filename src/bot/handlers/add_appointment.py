@@ -17,7 +17,12 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.bot.callback_data import (
@@ -106,6 +111,169 @@ async def on_client_new(callback: CallbackQuery, state: FSMContext, bot: Bot, **
         reply_markup=None,
     )
     await state.set_state(AddAppointment.creating_client_name)
+    await callback.answer()
+
+
+# ---- delete-mode in picker (🗑 Удалить клиента) ---------------------------
+
+
+@router.callback_query(AddAppointment.choosing_client, WizardCD.filter(F.action == "edit"))
+async def on_enter_delete_mode(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        recent = await ClientRepository(session).list_recent(limit=10)
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text="Кого удалить?",
+        reply_markup=client_picker_kb(recent=recent, mode="delete"),
+    )
+    await state.set_state(AddAppointment.deleting_client)
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.deleting_client, WizardCD.filter(F.action == "back"))
+async def on_exit_delete_mode(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """← Назад in delete-mode picker → restore the normal pick-mode picker."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        recent = await ClientRepository(session).list_recent(limit=10)
+    text = "Кого записываем?"
+    if not recent:
+        text = "У тебя ещё нет клиентов. Создаём первого."
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text=text,
+        reply_markup=client_picker_kb(recent=recent),
+    )
+    await state.set_state(AddAppointment.choosing_client)
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.deleting_client, ClientCD.filter(F.action == "delete"))
+async def on_pick_for_delete(
+    callback: CallbackQuery, callback_data: ClientCD, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        client = await ClientRepository(session).get(callback_data.client_id)
+        future_count = 0
+        if client is not None:
+            tz = await settings_service.get_timezone(session)
+            now_utc = (
+                datetime.now(tz=tz).astimezone(timezone.utc).replace(tzinfo=None)
+            )
+            future = await AppointmentRepository(session).list_for_client(
+                callback_data.client_id, start=now_utc
+            )
+            future_count = len(future)
+    if client is None:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+
+    body = f"Удалить клиента <b>{html.escape(client.name)}</b>?"
+    if future_count:
+        body += (
+            f"\n\n⚠️ У клиента {future_count} "
+            f"{'будущая запись' if future_count == 1 else 'будущих записей'} — "
+            "они тоже удалятся."
+        )
+    confirm_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить",
+                    callback_data=WizardCD(action="save").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Не надо",
+                    callback_data=WizardCD(action="cancel").pack(),
+                ),
+            ]
+        ]
+    )
+    await state.update_data(delete_client_id=callback_data.client_id)
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text=body,
+        reply_markup=confirm_kb,
+    )
+    await state.set_state(AddAppointment.confirming_delete)
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.confirming_delete, WizardCD.filter(F.action == "save"))
+async def on_confirm_delete(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    state_data = await state.get_data()
+    client_id = state_data.get("delete_client_id")
+    if client_id is not None:
+        async with session_scope(factory) as session:
+            await ClientRepository(session).delete(int(client_id))
+    # Return to delete-mode picker so user can keep cleaning up.
+    async with session_scope(factory) as session:
+        recent = await ClientRepository(session).list_recent(limit=10)
+    if not recent:
+        await advance(
+            bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            text="🗑 Удалено. Клиентов больше нет.",
+            reply_markup=client_picker_kb(recent=[], mode="delete"),
+        )
+    else:
+        await advance(
+            bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            text="🗑 Удалено. Кого ещё удалить? (← Назад чтобы вернуться)",
+            reply_markup=client_picker_kb(recent=recent, mode="delete"),
+        )
+    await state.set_state(AddAppointment.deleting_client)
+    await callback.answer()
+
+
+@router.callback_query(AddAppointment.confirming_delete, WizardCD.filter(F.action == "cancel"))
+async def on_abort_delete(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        recent = await ClientRepository(session).list_recent(limit=10)
+    await advance(
+        bot,
+        chat_id=callback.message.chat.id,
+        state=state,
+        text="Кого удалить?",
+        reply_markup=client_picker_kb(recent=recent, mode="delete"),
+    )
+    await state.set_state(AddAppointment.deleting_client)
     await callback.answer()
 
 

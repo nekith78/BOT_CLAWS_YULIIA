@@ -1,10 +1,12 @@
-"""Recent clients + 🔍 Поиск + ➕ Новый клиент."""
+"""Recent clients + 🔍 Поиск + ➕ Новый клиент / 🗑 Удалить клиента."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.bot.callback_data import ClientCD
+from src.bot.callback_data import ClientCD, WizardCD
 from src.storage.models import Client
 
 # Sentinel client_id used to route "🔍 Поиск" — anything ≤ 0 is invalid as a real id.
@@ -43,28 +45,58 @@ def _build_ordinals(clients: list[Client]) -> dict[int, int]:
     return ordinal_by_id
 
 
-def client_picker_kb(*, recent: list[Client]) -> InlineKeyboardMarkup:
+def client_picker_kb(
+    *,
+    recent: list[Client],
+    mode: Literal["pick", "delete"] = "pick",
+) -> InlineKeyboardMarkup:
+    """Render the client picker.
+
+    - mode="pick" (default): every client emits ClientCD(action="pick"); footer
+      shows 🔍 Поиск, ➕ Новый клиент, 🗑 Удалить клиента.
+    - mode="delete": every client emits ClientCD(action="delete"); footer shows
+      only ← Назад.
+    """
     ordinal_by_id = _build_ordinals(recent)
+    action = "pick" if mode == "pick" else "delete"
     rows: list[list[InlineKeyboardButton]] = []
     for c in recent:
         rows.append(
             [
                 InlineKeyboardButton(
                     text=_label_for(c, ordinal_by_id),
-                    callback_data=ClientCD(action="pick", client_id=c.id).pack(),
+                    callback_data=ClientCD(action=action, client_id=c.id).pack(),
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔍 Поиск",
-                callback_data=ClientCD(action="pick", client_id=SEARCH_SENTINEL).pack(),
-            ),
-            InlineKeyboardButton(
-                text="➕ Новый клиент",
-                callback_data=ClientCD(action="new").pack(),
-            ),
-        ]
-    )
+    if mode == "pick":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔍 Поиск",
+                    callback_data=ClientCD(action="pick", client_id=SEARCH_SENTINEL).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="➕ Новый клиент",
+                    callback_data=ClientCD(action="new").pack(),
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить клиента",
+                    callback_data=WizardCD(action="edit").pack(),
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="← Назад",
+                    callback_data=WizardCD(action="back").pack(),
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
