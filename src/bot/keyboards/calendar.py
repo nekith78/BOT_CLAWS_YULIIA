@@ -38,9 +38,10 @@ def calendar_kb(
     `CalendarCD(action="pick", iso_date=YYYY-MM-DD)`. Nav arrows emit
     `CalendarCD(action="nav", nav="prev"|"next", iso_date=anchor.month_first)`.
 
-    If `counts` is provided, days with at least one appointment get a
-    middle-dot suffix with the count: e.g. `15·3` for three appointments
-    on the 15th. Days without appointments stay plain (`15`).
+    When `counts` is provided, every active day cell carries a marker:
+    🟢 for "has appointments" (with `·N` count), 🔴 for "free". Without
+    `counts` the cells stay plain (`15`) — that branch is used by the
+    + Запись wizard where colour-coding the future would be misleading.
 
     If `back_callback_data` is provided, an extra row with «← Назад» is
     appended; tapping it sends that callback_data back to the dispatcher.
@@ -61,10 +62,12 @@ def calendar_kb(
                 row.append(InlineKeyboardButton(text=" ", callback_data=_NOOP))
             else:
                 iso = f"{year:04d}-{month:02d}-{day:02d}"
-                if counts and day in counts:
-                    label = f"{day}·{counts[day]}"
-                else:
+                if counts is None:
                     label = str(day)
+                elif day in counts:
+                    label = f"🟢 {day}·{counts[day]}"
+                else:
+                    label = f"🔴 {day}"
                 row.append(
                     InlineKeyboardButton(
                         text=label,

@@ -62,14 +62,27 @@ class TestCalendarKb:
                     return
         raise AssertionError("Did not find button '15'")
 
-    def test_busy_day_gets_count_suffix(self) -> None:
+    def test_busy_days_get_green_marker_with_count(self) -> None:
         kb = calendar_kb(anchor=date(2026, 5, 1), counts={6: 3, 15: 1})
         texts = {b.text for row in kb.inline_keyboard for b in row}
-        assert "6·3" in texts
-        assert "15·1" in texts
-        # An empty day stays plain
+        assert "🟢 6·3" in texts
+        assert "🟢 15·1" in texts
+
+    def test_free_days_get_red_marker_when_counts_provided(self) -> None:
+        kb = calendar_kb(anchor=date(2026, 5, 1), counts={6: 3})
+        texts = {b.text for row in kb.inline_keyboard for b in row}
+        # Day 20 has no appointments → red marker.
+        assert "🔴 20" in texts
+        # And day 6 keeps its green marker, not red.
+        assert "🔴 6" not in texts
+
+    def test_no_counts_leaves_cells_plain(self) -> None:
+        """Wizard contexts (e.g. + Запись when picking a date) pass no counts
+        and expect undecorated day cells."""
+        kb = calendar_kb(anchor=date(2026, 5, 1))
+        texts = {b.text for row in kb.inline_keyboard for b in row}
         assert "20" in texts
-        assert "20·" not in {t for t in texts if t.startswith("20")}
+        assert all("🟢" not in t and "🔴" not in t for t in texts)
 
 
 class TestTimePicker:
