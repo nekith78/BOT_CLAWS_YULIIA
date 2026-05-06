@@ -1,17 +1,22 @@
 """OpenRouter LLM provider for intent parsing.
 
 OpenRouter is a model-aggregator with an OpenAI-compatible Chat Completions
-endpoint and a real free tier (no profile-completion gating like Groq's).
-We reuse the official `openai` SDK pointed at OpenRouter's base URL.
+endpoint and a real free tier (no profile-completion gating). We reuse the
+official `openai` SDK pointed at OpenRouter's base URL.
 
-Default model: `meta-llama/llama-3.3-70b-instruct:free` — free tier,
-~200 requests/day, good function-calling, decent Russian. To swap, set
-`LLM_MODEL=...` in `.env` (paid options like
-`anthropic/claude-haiku-4.5` or `openai/gpt-4o-mini` work transparently).
+Default model: `deepseek/deepseek-chat-v3-0324:free` — DeepSeek V3 routed
+free through OpenRouter; great function-calling, very strong Russian,
+historically less rate-limited than llama-3.3-70b:free.
+
+Free-tier models on OpenRouter share upstream capacity across all users.
+A single 429 doesn't mean the key is broken — it means the upstream
+provider is currently saturated. We retry once after a short sleep
+before bubbling up.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -27,11 +32,11 @@ class OpenRouterLLM:
         self,
         *,
         api_key: str,
-        model: str = "meta-llama/llama-3.3-70b-instruct:free",
+        model: str = "deepseek/deepseek-chat-v3-0324:free",
     ) -> None:
         from openai import AsyncOpenAI
 
-        # OpenRouter is OpenAI-compatible. The optional headers below show up in
+        # OpenRouter is OpenAI-compatible. The headers below show up in
         # OpenRouter's leaderboards / per-app analytics — purely cosmetic.
         self._client = AsyncOpenAI(
             api_key=api_key,
@@ -63,15 +68,12 @@ class OpenRouterLLM:
             for t in tools
         ]
 
-        response = await self._client.chat.completions.create(  # type: ignore[call-overload]
-            model=self._model,
+        response = await self._call_with_retry(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": text},
             ],
-            tools=openai_tools,
-            tool_choice="auto",
-            temperature=0.0,
+            openai_tools=openai_tools,
         )
 
         message = response.choices[0].message
@@ -94,3 +96,40 @@ class OpenRouterLLM:
             args = {}
         log.info("openrouter parse: tool=%s args=%s", tc.function.name, args)
         return ParsedIntent(tool_name=tc.function.name, args=args, raw_text=text)
+
+    async def _call_with_retry(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        openai_tools: list[dict[str, Any]],
+    ) -> Any:
+        """Retry once on 429 — free-tier models on OpenRouter share upstream
+        capacity across all users, so a transient 429 is the norm during
+        peak load. One retry after 2 sec usually unblocks us; if the second
+        attempt also fails the user gets a clear «перегружен» message."""
+        from openai import RateLimitError
+
+        attempts = 0
+        last_exc: Exception | None = None
+        while attempts < 2:
+            try:
+                return await self._client.chat.completions.create(  # type: ignore[call-overload]
+                    model=self._model,
+                    messages=messages,
+                    tools=openai_tools,
+                    tool_choice="auto",
+                    temperature=0.0,
+                )
+            except RateLimitError as exc:
+                last_exc = exc
+                if attempts >= 1:
+                    raise
+                log.warning(
+                    "openrouter 429 (upstream rate-limit) on attempt %d "
+                    "— sleeping 2s and retrying",
+                    attempts + 1,
+                )
+                await asyncio.sleep(2.0)
+                attempts += 1
+        assert last_exc is not None
+        raise last_exc

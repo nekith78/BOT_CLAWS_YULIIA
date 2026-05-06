@@ -32,7 +32,7 @@ def get_llm(settings: Settings) -> LLMProvider:
 
         if settings.openrouter_api_key is None:
             raise RuntimeError("OPENROUTER_API_KEY required for openrouter")
-        model = settings.llm_model or "meta-llama/llama-3.3-70b-instruct:free"
+        model = settings.llm_model or "deepseek/deepseek-chat-v3-0324:free"
         return OpenRouterLLM(
             api_key=settings.openrouter_api_key.get_secret_value(),
             model=model,
