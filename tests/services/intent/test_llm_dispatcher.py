@@ -28,7 +28,7 @@ def _base_env(**overrides: str) -> dict[str, str]:
     base = {
         "BOT_TOKEN": "12345:test-token",
         "OWNER_CHAT_ID": "111",
-        "GROQ_API_KEY": "gsk-fake",
+        "OPENROUTER_API_KEY": "sk-or-v1-fake",
     }
     for stale in (
         "STT_PROVIDER",
@@ -36,6 +36,7 @@ def _base_env(**overrides: str) -> dict[str, str]:
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
+        "GROQ_API_KEY",
     ):
         os.environ.pop(stale, None)
     base.update(overrides)
@@ -48,11 +49,33 @@ class _FakeGenaiClient:
 
 
 class _FakeAsyncOpenAI:
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
+    ) -> None:
         self.chat = None
 
 
-def test_dispatcher_returns_groq_by_default(
+def test_dispatcher_returns_openrouter_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    from src.config import Settings
+    from src.services.intent.llm import get_llm
+    from src.services.intent.llm_openrouter import OpenRouterLLM
+
+    with _env(**_base_env()):
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    llm = get_llm(settings)
+    assert isinstance(llm, OpenRouterLLM)
+
+
+def test_dispatcher_returns_groq_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
@@ -61,7 +84,9 @@ def test_dispatcher_returns_groq_by_default(
     from src.services.intent.llm import get_llm
     from src.services.intent.llm_groq import GroqLLM
 
-    with _env(**_base_env()):
+    env = _base_env(LLM_PROVIDER="groq", GROQ_API_KEY="gsk-fake")
+    env.pop("OPENROUTER_API_KEY")
+    with _env(**env):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     llm = get_llm(settings)
@@ -78,7 +103,7 @@ def test_dispatcher_returns_gemini_when_configured(
     from src.services.intent.llm_gemini import GeminiLLM
 
     env = _base_env(LLM_PROVIDER="gemini", GEMINI_API_KEY="fake-gemini-key")
-    env.pop("GROQ_API_KEY")
+    env.pop("OPENROUTER_API_KEY")
     with _env(**env):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -92,7 +117,7 @@ def test_dispatcher_returns_openai_mini_when_configured() -> None:
     from src.services.intent.llm_openai import OpenAIMiniLLM
 
     env = _base_env(LLM_PROVIDER="openai_mini", OPENAI_API_KEY="sk-test")
-    env.pop("GROQ_API_KEY")
+    env.pop("OPENROUTER_API_KEY")
     with _env(**env):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -106,7 +131,7 @@ def test_dispatcher_returns_anthropic_haiku_when_configured() -> None:
     from src.services.intent.llm_anthropic import AnthropicHaikuLLM
 
     env = _base_env(LLM_PROVIDER="anthropic_haiku", ANTHROPIC_API_KEY="ant-test")
-    env.pop("GROQ_API_KEY")
+    env.pop("OPENROUTER_API_KEY")
     with _env(**env):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
 

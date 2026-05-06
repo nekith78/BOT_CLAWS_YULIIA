@@ -27,6 +27,16 @@ class LLMProvider(Protocol):
 
 def get_llm(settings: Settings) -> LLMProvider:
     """Construct the LLM provider configured in `settings`."""
+    if settings.llm_provider == "openrouter":
+        from src.services.intent.llm_openrouter import OpenRouterLLM
+
+        if settings.openrouter_api_key is None:
+            raise RuntimeError("OPENROUTER_API_KEY required for openrouter")
+        model = settings.llm_model or "meta-llama/llama-3.3-70b-instruct:free"
+        return OpenRouterLLM(
+            api_key=settings.openrouter_api_key.get_secret_value(),
+            model=model,
+        )
     if settings.llm_provider == "groq":
         from src.services.intent.llm_groq import GroqLLM
 

@@ -29,13 +29,14 @@ def _base_env(**overrides: str) -> dict[str, str]:
     base = {
         "BOT_TOKEN": "12345:test-token",
         "OWNER_CHAT_ID": "111",
-        "GROQ_API_KEY": "gsk-fake",
+        "OPENROUTER_API_KEY": "sk-or-v1-fake",
     }
     for stale in (
         "STT_PROVIDER",
         "LLM_PROVIDER",
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
+        "GROQ_API_KEY",
     ):
         os.environ.pop(stale, None)
     base.update(overrides)

@@ -35,17 +35,21 @@ class Settings(BaseSettings):
     voice_max_duration_sec: int = 60
 
     # --- LLM provider ------------------------------------------------------
+    # openrouter: OpenRouter aggregator, FREE tier 200 RPD, ключ в OPENROUTER_API_KEY.
     # groq: Groq Cloud (llama-3.3-70b), FREE 6000 RPD, ключ в GROQ_API_KEY.
     # gemini: Gemini Flash, FREE 1500 RPD, ключ в GEMINI_API_KEY.
     # openai_mini: gpt-4o-mini, ~$0.30/1k команд, ключ в OPENAI_API_KEY.
     # anthropic_haiku: Claude Haiku 4.5, ~$3/1k команд, ключ в ANTHROPIC_API_KEY.
-    llm_provider: Literal["groq", "gemini", "openai_mini", "anthropic_haiku"] = "groq"
+    llm_provider: Literal[
+        "openrouter", "groq", "gemini", "openai_mini", "anthropic_haiku"
+    ] = "openrouter"
     llm_model: str | None = None  # optional override; each provider has a default
 
     # --- API keys ----------------------------------------------------------
     openai_api_key: SecretStr | None = None       # openai_whisper STT + openai_mini LLM
     gemini_api_key: SecretStr | None = None       # gemini LLM
     groq_api_key: SecretStr | None = None         # groq LLM
+    openrouter_api_key: SecretStr | None = None   # openrouter LLM
     anthropic_api_key: SecretStr | None = None    # anthropic_haiku LLM
 
     # --- Infra -------------------------------------------------------------
@@ -67,6 +71,8 @@ class Settings(BaseSettings):
             raise ValueError("STT_PROVIDER=openai_whisper requires OPENAI_API_KEY")
 
         # LLM validation. Each provider requires its own key.
+        if self.llm_provider == "openrouter" and not self.openrouter_api_key:
+            raise ValueError("LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY")
         if self.llm_provider == "groq" and not self.groq_api_key:
             raise ValueError("LLM_PROVIDER=groq requires GROQ_API_KEY")
         if self.llm_provider == "gemini" and not self.gemini_api_key:
