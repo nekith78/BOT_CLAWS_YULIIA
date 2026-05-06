@@ -27,6 +27,16 @@ class LLMProvider(Protocol):
 
 def get_llm(settings: Settings) -> LLMProvider:
     """Construct the LLM provider configured in `settings`."""
+    if settings.llm_provider == "groq":
+        from src.services.intent.llm_groq import GroqLLM
+
+        if settings.groq_api_key is None:
+            raise RuntimeError("GROQ_API_KEY required for groq")
+        model = settings.llm_model or "llama-3.3-70b-versatile"
+        return GroqLLM(
+            api_key=settings.groq_api_key.get_secret_value(),
+            model=model,
+        )
     if settings.llm_provider == "gemini":
         from src.services.intent.llm_gemini import GeminiLLM
 
