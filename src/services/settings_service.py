@@ -13,11 +13,15 @@ from src.storage.repositories.notify_rules import NotifyRuleRepository
 from src.storage.repositories.settings import SettingRepository
 
 DEFAULT_TIMEZONE = "Asia/Almaty"
-DEFAULT_PRESET = "eve_morning"
+DEFAULT_PRESET = "eve_offset_60m"
 DEFAULT_DURATION_MIN = 60
+# Defaults agreed with the user in Plan #3:
+# - 20:00 day-before digest of all next-day appointments;
+# - exact 60-min ping before each individual appointment.
+# Morning 09:00 digest is intentionally absent.
 DEFAULT_RULES: list[tuple[str, str, bool]] = [
     ("time_day_before", "20:00", True),
-    ("time_same_day", "09:00", True),
+    ("offset_before", "60m", True),
 ]
 
 

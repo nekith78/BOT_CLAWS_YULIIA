@@ -18,13 +18,13 @@ async def test_seed_creates_defaults_if_empty(session: AsyncSession) -> None:
     rules_repo = NotifyRuleRepository(session)
 
     assert await settings_repo.get("timezone") == "Asia/Almaty"
-    assert await settings_repo.get("notify_preset") == "eve_morning"
+    assert await settings_repo.get("notify_preset") == "eve_offset_60m"
     assert await settings_repo.get_int("default_duration_min") == 60
 
     rules = await rules_repo.list_enabled()
     assert {(r.kind, r.value) for r in rules} == {
         ("time_day_before", "20:00"),
-        ("time_same_day", "09:00"),
+        ("offset_before", "60m"),
     }
 
 
