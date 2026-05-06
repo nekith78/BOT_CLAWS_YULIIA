@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.storage.models import (
     Appointment,
+    AppointmentNotifyOverride,
     Client,
     NotifyRule,
     ScheduledJob,
@@ -127,3 +128,33 @@ async def test_scheduled_job_links_appointment(session: AsyncSession) -> None:
     saved = result.scalar_one()
     assert saved.sent_at is None
     assert saved.kind == "eve_digest"
+
+
+@pytest.mark.asyncio
+async def test_appointment_notify_override_cascade(session: AsyncSession) -> None:
+    """Override rows must disappear together with their appointment."""
+    client = Client(name="Олег")
+    session.add(client)
+    await session.flush()
+    appt = Appointment(
+        client_id=client.id,
+        starts_at=datetime(2026, 5, 6, 14, 0, tzinfo=timezone.utc),
+    )
+    session.add(appt)
+    await session.flush()
+    override = AppointmentNotifyOverride(
+        appointment_id=appt.id, kind="offset_before", value="120m", enabled=True
+    )
+    session.add(override)
+    await session.commit()
+
+    appt_id = appt.id
+    await session.delete(appt)
+    await session.commit()
+
+    result = await session.execute(
+        select(AppointmentNotifyOverride).where(
+            AppointmentNotifyOverride.appointment_id == appt_id
+        )
+    )
+    assert result.scalars().all() == []

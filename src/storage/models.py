@@ -101,3 +101,30 @@ class ScheduledJob(Base):
     __table_args__ = (
         Index("idx_jobs_fire_sent", "fire_at", "sent_at"),
     )
+
+
+class AppointmentNotifyOverride(Base):
+    """Per-appointment override для notify rules.
+
+    Если у конкретной записи есть строки в этой таблице — они **полностью
+    заменяют** глобальные `notify_rules` для расчёта `scheduled_jobs` именно
+    этой записи. Если строк нет — используются глобальные defaults.
+
+    kind: time_day_before | time_same_day | offset_before
+    value: то же что у NotifyRule (HH:MM или "60m"/"24h"/"2d").
+    """
+
+    __tablename__ = "appointment_notify_overrides"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    appointment_id: Mapped[int] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    value: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=func.now())
+
+    __table_args__ = (
+        Index("idx_appt_notify_appt", "appointment_id"),
+    )
