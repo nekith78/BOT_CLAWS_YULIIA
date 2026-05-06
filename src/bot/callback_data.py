@@ -50,4 +50,4 @@ class DateShortcutCD(CallbackData, prefix="dateshort", sep="|"):
     """Date-step shortcuts on the AddAppointment FSM screen."""
 
     v: int = 1
-    action: Literal["today", "tomorrow", "day_after", "open_calendar", "text_input"]
+    action: Literal["today", "tomorrow", "day_after", "open_calendar"]

@@ -67,7 +67,7 @@ class TestWizardCD:
 
 class TestDateShortcutCD:
     @pytest.mark.parametrize(
-        "action", ["today", "tomorrow", "day_after", "open_calendar", "text_input"]
+        "action", ["today", "tomorrow", "day_after", "open_calendar"]
     )
     def test_round_trip(self, action: str) -> None:
         cd = DateShortcutCD(action=action)  # type: ignore[arg-type]

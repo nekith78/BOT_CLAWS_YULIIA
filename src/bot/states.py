@@ -10,7 +10,6 @@ class AddAppointment(StatesGroup):
     searching_client = State()
     creating_client_name = State()
     creating_client_instagram = State()
-    viewing_client = State()  # client card with «Записать / Удалить / ← Назад»
     confirming_delete = State()  # confirm-delete dialog within wizard
     choosing_date = State()
     entering_date = State()

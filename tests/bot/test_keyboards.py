@@ -202,7 +202,24 @@ class TestAppointmentCardKb:
 
 
 class TestDateShortcutKb:
-    def test_all_buttons_present(self) -> None:
+    def test_no_client_id_omits_delete_row(self) -> None:
         kb = date_shortcut_kb()
         texts = {b.text for row in kb.inline_keyboard for b in row}
-        assert {"Сегодня", "Завтра", "Послезавтра", "📅 Календарь", "⌨️ Текстом"} == texts
+        assert texts == {"Сегодня", "Завтра", "Послезавтра", "📅 Календарь"}
+
+    def test_with_client_id_includes_delete_button(self) -> None:
+        kb = date_shortcut_kb(client_id=42)
+        texts = {b.text for row in kb.inline_keyboard for b in row}
+        assert texts == {
+            "Сегодня",
+            "Завтра",
+            "Послезавтра",
+            "🗑 Удалить клиента",
+            "📅 Календарь",
+        }
+        # Delete button must carry client_id=42 in its callback_data.
+        for row in kb.inline_keyboard:
+            for b in row:
+                if b.text == "🗑 Удалить клиента":
+                    assert b.callback_data is not None
+                    assert "client|1|delete|42" in b.callback_data
