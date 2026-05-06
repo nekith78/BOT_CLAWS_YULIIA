@@ -26,6 +26,6 @@ def period_picker_kb(
 
     rows = [
         [btn("Сегодня", "today"), btn("Неделя", "week"), btn("Месяц", "month")],
-        [btn("Все", "all"), btn("📅 Дата", "date")],
+        [btn("Все", "all"), btn("📅 Календарь", "date")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
