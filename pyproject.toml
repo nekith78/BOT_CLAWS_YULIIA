@@ -39,6 +39,8 @@ structlog = "^24.4"
 # Time zones (zoneinfo built-in for py3.12, но Windows нужен tzdata)
 tzdata = "^2024.2"
 greenlet = "^3.5.0"
+faster-whisper = "^1.2.1"
+google-genai = "^1.75.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
@@ -85,4 +87,9 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 # apscheduler ships no py.typed marker / stubs as of 3.10.x.
 module = ["apscheduler.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# faster-whisper / ctranslate2 / google-genai do not ship py.typed.
+module = ["faster_whisper.*", "ctranslate2.*", "google.genai.*"]
 ignore_missing_imports = true

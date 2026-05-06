@@ -20,7 +20,8 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --only main --no-root --no-ansi
 
 # ----------------------------------------------------------------------------
-# Runtime: минимальный образ + ffmpeg (для конвертации .ogg голосовых)
+# Runtime: минимальный образ + ffmpeg (для конвертации .ogg голосовых) +
+# libgomp1 (OpenMP runtime, нужен ctranslate2 → faster-whisper)
 # ----------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
@@ -30,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=UTC
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

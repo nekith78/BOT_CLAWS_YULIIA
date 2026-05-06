@@ -1,7 +1,7 @@
 """Application configuration loaded from environment variables.
 
 Все секреты и настройки приходят из `.env` или окружения. На старте бот падает
-с понятной ошибкой, если обязательная переменная не задана или провайдер STT
+с понятной ошибкой, если обязательная переменная не задана или провайдер STT/LLM
 выбран без соответствующих ключей.
 """
 
@@ -28,14 +28,23 @@ class Settings(BaseSettings):
     owner_tz: str = "Asia/Almaty"
 
     # --- STT provider ------------------------------------------------------
-    stt_provider: Literal["openai", "yandex"] = "openai"
-    openai_api_key: SecretStr | None = None
-    yandex_api_key: SecretStr | None = None
-    yandex_folder_id: str | None = None
+    # faster_whisper: локальный, FREE, +500 МБ к Docker-образу.
+    # openai_whisper: облачный fallback, $0.006/мин, ключ в OPENAI_API_KEY.
+    stt_provider: Literal["faster_whisper", "openai_whisper"] = "faster_whisper"
+    whisper_model_size: str = "small"  # tiny | base | small | medium | large-v3
+    voice_max_duration_sec: int = 60
 
-    # --- LLM parser --------------------------------------------------------
-    llm_model: str = "gpt-4o-mini"
-    llm_api_key: SecretStr | None = None  # fallback на openai_api_key
+    # --- LLM provider ------------------------------------------------------
+    # gemini: Gemini Flash 2.5, FREE tier 1500 RPD, ключ в GEMINI_API_KEY.
+    # openai_mini: gpt-4o-mini, ~$0.30/1k команд, ключ в OPENAI_API_KEY.
+    # anthropic_haiku: Claude Haiku 4.5, ~$3/1k команд, ключ в ANTHROPIC_API_KEY.
+    llm_provider: Literal["gemini", "openai_mini", "anthropic_haiku"] = "gemini"
+    llm_model: str | None = None  # optional override; each provider has a default
+
+    # --- API keys ----------------------------------------------------------
+    openai_api_key: SecretStr | None = None       # openai_whisper STT + openai_mini LLM
+    gemini_api_key: SecretStr | None = None       # gemini LLM
+    anthropic_api_key: SecretStr | None = None    # anthropic_haiku LLM
 
     # --- Infra -------------------------------------------------------------
     redis_url: str = "redis://redis:6379/0"
@@ -46,27 +55,22 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
-    def effective_llm_key(self) -> SecretStr | None:
-        return self.llm_api_key or self.openai_api_key
-
-    @property
     def db_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.db_path}"
 
     @model_validator(mode="after")
     def _validate_provider_keys(self) -> Settings:
-        if self.stt_provider == "openai" and not self.openai_api_key:
-            raise ValueError("STT_PROVIDER=openai requires OPENAI_API_KEY")
-        if self.stt_provider == "yandex" and not (
-            self.yandex_api_key and self.yandex_folder_id
-        ):
-            raise ValueError(
-                "STT_PROVIDER=yandex requires YANDEX_API_KEY and YANDEX_FOLDER_ID"
-            )
-        if self.effective_llm_key is None:
-            raise ValueError(
-                "LLM key is required: set LLM_API_KEY or OPENAI_API_KEY"
-            )
+        # STT validation. faster_whisper requires no key — runs locally.
+        if self.stt_provider == "openai_whisper" and not self.openai_api_key:
+            raise ValueError("STT_PROVIDER=openai_whisper requires OPENAI_API_KEY")
+
+        # LLM validation. Each provider requires its own key.
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError("LLM_PROVIDER=gemini requires GEMINI_API_KEY")
+        if self.llm_provider == "openai_mini" and not self.openai_api_key:
+            raise ValueError("LLM_PROVIDER=openai_mini requires OPENAI_API_KEY")
+        if self.llm_provider == "anthropic_haiku" and not self.anthropic_api_key:
+            raise ValueError("LLM_PROVIDER=anthropic_haiku requires ANTHROPIC_API_KEY")
         return self
 
 
