@@ -109,6 +109,61 @@ class TestClientPicker:
         assert "Олег" in texts and "Аня" in texts
         assert "🔍 Поиск" in texts and "➕ Новый клиент" in texts
 
+    def test_instagram_always_appended_in_parens(self) -> None:
+        clients = [
+            Client(id=1, name="Олег", instagram="oleg_insta", notes=None, created_at=None),
+            Client(id=2, name="Аня", instagram=None, notes=None, created_at=None),
+        ]
+        kb = client_picker_kb(recent=clients)
+        texts = [b.text for row in kb.inline_keyboard for b in row]
+        assert "Олег (@oleg_insta)" in texts
+        assert "Аня" in texts  # no instagram, unique → no decoration
+
+    def test_duplicate_names_without_instagram_get_ordinal_suffix(self) -> None:
+        clients = [
+            Client(id=5, name="Олег", instagram=None, notes=None, created_at=None),
+            Client(id=8, name="Олег", instagram=None, notes=None, created_at=None),
+        ]
+        kb = client_picker_kb(recent=clients)
+        texts = [b.text for row in kb.inline_keyboard for b in row]
+        # Older id (5) → -1, newer id (8) → -2
+        assert "Олег-1" in texts
+        assert "Олег-2" in texts
+
+    def test_duplicate_names_one_with_instagram(self) -> None:
+        # If one of the dupes has instagram, only the other(s) might still
+        # need disambiguation — but a single remaining one is unique now.
+        clients = [
+            Client(id=5, name="Олег", instagram="oleg_a", notes=None, created_at=None),
+            Client(id=8, name="Олег", instagram=None, notes=None, created_at=None),
+        ]
+        kb = client_picker_kb(recent=clients)
+        texts = [b.text for row in kb.inline_keyboard for b in row]
+        assert "Олег (@oleg_a)" in texts
+        # Only one Олег without instagram → label stays "Олег" (no -1 suffix)
+        assert "Олег" in texts
+
+    def test_duplicate_names_both_with_different_instagrams(self) -> None:
+        clients = [
+            Client(id=5, name="Олег", instagram="oleg_a", notes=None, created_at=None),
+            Client(id=8, name="Олег", instagram="oleg_b", notes=None, created_at=None),
+        ]
+        kb = client_picker_kb(recent=clients)
+        texts = [b.text for row in kb.inline_keyboard for b in row]
+        assert "Олег (@oleg_a)" in texts
+        assert "Олег (@oleg_b)" in texts
+
+    def test_case_insensitive_duplicate_detection(self) -> None:
+        clients = [
+            Client(id=5, name="Олег", instagram=None, notes=None, created_at=None),
+            Client(id=8, name="ОЛЕГ", instagram=None, notes=None, created_at=None),
+        ]
+        kb = client_picker_kb(recent=clients)
+        texts = [b.text for row in kb.inline_keyboard for b in row]
+        # Case-insensitive grouping → both get suffix
+        assert "Олег-1" in texts
+        assert "ОЛЕГ-2" in texts
+
 
 class TestConfirmKb:
     def test_three_buttons(self) -> None:
