@@ -38,9 +38,6 @@ from src.bot.handlers import (
     clients as clients_handlers,
 )
 from src.bot.handlers import (
-    dev_panel as dev_panel_handlers,  # TEMP: remove with the file when done debugging
-)
-from src.bot.handlers import (
     lists as lists_handlers,
 )
 from src.bot.handlers import (
@@ -109,7 +106,6 @@ def _build_dispatcher(
 
     # Order matters: system has the highest priority so /cancel always wins.
     dp.include_router(system_handlers.router)
-    dp.include_router(dev_panel_handlers.router)  # TEMP debug panel
     dp.include_router(start_handlers.router)
     dp.include_router(add_appt_handlers.router)
     dp.include_router(text_add_handlers.router)
