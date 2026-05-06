@@ -36,7 +36,7 @@ class HistoryFilter(StatesGroup):
 
 
 class ListsFilter(StatesGroup):
-    entering_date = State()
+    choosing_date = State()  # calendar is open in lists scope
 
 
 class BrowseClients(StatesGroup):

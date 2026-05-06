@@ -24,7 +24,8 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.bot.callback_data import ApptCD, PeriodCD
+from src.bot.callback_data import ApptCD, CalendarCD, PeriodCD
+from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.period_picker import period_picker_kb
 from src.bot.states import ListsFilter
 from src.bot.ui import show_in_callback
@@ -90,13 +91,18 @@ async def on_period_picked(
         await callback.answer()
         return
     if callback_data.kind == "date":
+        # Open the inline calendar instead of asking for typed YYYY-MM-DD.
+        factory = cast(async_sessionmaker[Any], data["session_factory"])
+        async with session_scope(factory) as session:
+            tz = await settings_service.get_timezone(session)
+        today_local = datetime.now(tz=tz).date()
         await show_in_callback(
             callback,
             bot=bot,
-            text="Введи дату YYYY-MM-DD:",
-            reply_markup=None,
+            text="Выбери день:",
+            reply_markup=calendar_kb(anchor=today_local),
         )
-        await state.set_state(ListsFilter.entering_date)
+        await state.set_state(ListsFilter.choosing_date)
         await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
@@ -107,21 +113,43 @@ async def on_period_picked(
     await callback.answer()
 
 
-@router.message(ListsFilter.entering_date, F.text)
-async def on_date_text(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
-    if message.text is None:
-        return
-    try:
-        anchor = date.fromisoformat(message.text.strip())
-    except ValueError:
-        await bot.send_message(
-            chat_id=message.chat.id, text="Не понял. Попробуй YYYY-MM-DD:"
-        )
+@router.callback_query(ListsFilter.choosing_date, CalendarCD.filter(F.action == "pick"))
+async def on_calendar_pick(
+    callback: CallbackQuery, callback_data: CalendarCD, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
         return
     factory = cast(async_sessionmaker[Any], data["session_factory"])
-    text, kb = await _build_lists_payload(factory, kind="date", anchor=anchor)
-    await bot.send_message(chat_id=message.chat.id, text=text, reply_markup=kb)
+    picked = date.fromisoformat(callback_data.iso_date)
+    text, kb = await _build_lists_payload(factory, kind="date", anchor=picked)
+    await show_in_callback(callback, bot=bot, text=text, reply_markup=kb)
     await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(ListsFilter.choosing_date, CalendarCD.filter(F.action == "nav"))
+async def on_calendar_nav(
+    callback: CallbackQuery, callback_data: CalendarCD, bot: Bot, **_: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    anchor = date.fromisoformat(callback_data.iso_date)
+    delta = -1 if callback_data.nav == "prev" else 32
+    new_anchor = (anchor + timedelta(days=delta)).replace(day=1)
+    await show_in_callback(
+        callback,
+        bot=bot,
+        text="Выбери день:",
+        reply_markup=calendar_kb(anchor=new_anchor),
+    )
+    await callback.answer()
+
+
+@router.callback_query(ListsFilter.choosing_date, CalendarCD.filter(F.action == "noop"))
+async def on_calendar_noop(callback: CallbackQuery, **_: Any) -> None:
+    await callback.answer()
 
 
 # ---------- builder ---------------------------------------------------------
@@ -180,17 +208,25 @@ async def _build_lists_payload(
         if start_utc is not None and end_utc is not None:
             appts = await repo.list_in_range(start=start_utc, end=end_utc)
         else:
-            # "all" — pull a wide window via list_in_range with an
-            # epoch..far-future range. find_overlap helpers stay UTC-naive.
+            # "all" → only future, starting from today_local 00:00 → UTC.
+            today_start_local = datetime.combine(today_local, time(0), tzinfo=tz)
+            today_start_utc = (
+                today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
+            )
             appts = await repo.list_in_range(
-                start=datetime(1970, 1, 1),
+                start=today_start_utc,
                 end=datetime(2100, 1, 1),
             )
         pairs = await _hydrate(session, appts)
 
-    header = format_period_header(
-        kind, anchor=datetime.combine(header_anchor, time(0))
-    )
+    if kind == "all":
+        # In lists scope "all" means future-only — the header reflects that
+        # so the user is not surprised by the missing past rows.
+        header = "Все будущие записи"
+    else:
+        header = format_period_header(
+            kind, anchor=datetime.combine(header_anchor, time(0))
+        )
     if not pairs:
         return f"{header}\n\nЗаписей нет.", None
 
