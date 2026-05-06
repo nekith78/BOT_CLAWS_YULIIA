@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -86,18 +87,25 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
         log.error("intake: voice received but STT/settings not in dispatcher data")
         return
 
+    chat_id = message.chat.id
     duration = message.voice.duration or 0
     if duration > settings.voice_max_duration_sec:
         await bot.send_message(
-            chat_id=message.chat.id,
+            chat_id=chat_id,
             text=f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
         )
         return
 
+    # Cancel any active wizard before showing the status — keeps message order
+    # natural (cancel ack first, then "обрабатываю").
+    await _cancel_active_state(bot=bot, state=state, chat_id=chat_id)
+
+    status_msg_id = await _send_status(bot, chat_id, "⏳ Распознаю голос…")
+
     # Download voice as bytes.
     file = await bot.get_file(message.voice.file_id)
     if file.file_path is None:
-        await bot.send_message(message.chat.id, "Не удалось скачать голосовое.")
+        await _replace_status(bot, chat_id, status_msg_id, "Не удалось скачать голосовое.")
         return
     buf = io.BytesIO()
     await bot.download_file(file.file_path, buf)
@@ -105,13 +113,21 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
 
     transcript = await stt.transcribe(audio, mime="audio/ogg")
     if not transcript.strip():
-        await bot.send_message(
-            message.chat.id, "Не услышал ничего. Попробуй ещё раз."
+        await _replace_status(
+            bot, chat_id, status_msg_id, "Не услышал ничего. Попробуй ещё раз."
         )
         return
 
     log.info("intake voice → transcript: %r", transcript)
-    await _dispatch(message=message, state=state, bot=bot, transcript=transcript, data=data)
+    await _edit_status(bot, chat_id, status_msg_id, "⏳ Обрабатываю команду…")
+    await _dispatch(
+        message=message,
+        state=state,
+        bot=bot,
+        transcript=transcript,
+        data=data,
+        status_msg_id=status_msg_id,
+    )
 
 
 # ---------- entry: free text -------------------------------------------------
@@ -128,7 +144,70 @@ async def on_text(message: Message, state: FSMContext, bot: Bot, **data: Any) ->
     text = message.text.strip()
     if not text:
         return
-    await _dispatch(message=message, state=state, bot=bot, transcript=text, data=data)
+    chat_id = message.chat.id
+    await _cancel_active_state(bot=bot, state=state, chat_id=chat_id)
+    status_msg_id = await _send_status(bot, chat_id, "⏳ Обрабатываю команду…")
+    await _dispatch(
+        message=message,
+        state=state,
+        bot=bot,
+        transcript=text,
+        data=data,
+        status_msg_id=status_msg_id,
+    )
+
+
+# ---------- status-message helpers -------------------------------------------
+
+
+async def _send_status(bot: Bot, chat_id: int, text: str) -> int:
+    msg = await bot.send_message(chat_id, text)
+    return msg.message_id
+
+
+async def _edit_status(bot: Bot, chat_id: int, message_id: int, text: str) -> None:
+    """Update the status text in place. Errors swallowed — the worst case is
+    the user sees the previous status text for an extra second."""
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+    except TelegramBadRequest as exc:
+        log.debug("intake: edit_status failed: %s", exc)
+
+
+async def _replace_status(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> int:
+    """Replace the status message with a final response. Falls back to
+    delete + send-new if Telegram refuses the edit. Returns the resulting
+    message id (same id on edit, new id on fallback)."""
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+        return message_id
+    except TelegramBadRequest as exc:
+        log.debug("intake: replace_status edit failed (%s); falling back", exc)
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except TelegramBadRequest:
+            pass
+        msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+        return msg.message_id
+
+
+async def _cancel_active_state(*, bot: Bot, state: FSMContext, chat_id: int) -> None:
+    """If the user is mid-FSM, finalise with «❌ Отменено» before intake takes over."""
+    cur_state = await state.get_state()
+    if cur_state is not None:
+        await ui_cancel(bot, chat_id=chat_id, state=state)
 
 
 # ---------- common dispatch --------------------------------------------------
@@ -141,13 +220,9 @@ async def _dispatch(
     bot: Bot,
     transcript: str,
     data: dict[str, Any],
+    status_msg_id: int,
 ) -> None:
     chat_id = message.chat.id
-
-    # If user is mid-wizard, cancel it gracefully — voice always interrupts.
-    cur_state = await state.get_state()
-    if cur_state is not None:
-        await ui_cancel(bot, chat_id=chat_id, state=state)
 
     factory = cast(async_sessionmaker[Any], data["session_factory"])
     settings = data["settings"]
@@ -173,19 +248,20 @@ async def _dispatch(
             )
         except Exception:
             log.exception("intake: LLM parse failed")
-            await bot.send_message(
-                chat_id, "Не могу разобрать команду — попробуй кнопками."
+            await _replace_status(
+                bot, chat_id, status_msg_id,
+                "Не могу разобрать команду — попробуй ещё раз или сделай кнопками.",
             )
             return
 
         if parsed.tool_name is None:
-            await bot.send_message(chat_id, _help_text())
+            await _replace_status(bot, chat_id, status_msg_id, _help_text())
             return
 
         action = registry.get(parsed.tool_name)
         if action is None:
             log.warning("intake: LLM picked unknown tool %s", parsed.tool_name)
-            await bot.send_message(chat_id, _help_text())
+            await _replace_status(bot, chat_id, status_msg_id, _help_text())
             return
 
         ctx = ActionContext(
@@ -208,6 +284,7 @@ async def _dispatch(
         action=action,
         args=parsed.args,
         response=response,
+        status_msg_id=status_msg_id,
     )
 
 
@@ -219,12 +296,16 @@ async def _render(
     action: Action,
     args: dict[str, Any],
     response: ActionResponse,
+    status_msg_id: int,
 ) -> None:
     if response.result is ActionResult.EXECUTED:
-        await bot.send_message(chat_id, response.text, reply_markup=response.keyboard)
+        await _replace_status(
+            bot, chat_id, status_msg_id, response.text,
+            reply_markup=response.keyboard,
+        )
         return
     if response.result is ActionResult.FAIL:
-        await bot.send_message(chat_id, response.text)
+        await _replace_status(bot, chat_id, status_msg_id, response.text)
         return
     if response.result is ActionResult.CONFIRM:
         tag = uuid.uuid4().hex[:8]
@@ -235,14 +316,15 @@ async def _render(
             intake_args_so_far=args,
         )
         await state.set_state(IntakePending.confirming)
-        await bot.send_message(
-            chat_id, response.text, reply_markup=confirm_card_kb(tag=tag)
+        await _replace_status(
+            bot, chat_id, status_msg_id, response.text,
+            reply_markup=confirm_card_kb(tag=tag),
         )
         return
     if response.result is ActionResult.CLARIFY:
         if not response.clarify_options:
             log.warning("intake: CLARIFY without options for %s", action.name)
-            await bot.send_message(chat_id, response.text)
+            await _replace_status(bot, chat_id, status_msg_id, response.text)
             return
         tag = uuid.uuid4().hex[:8]
         rows: list[list[InlineKeyboardButton]] = [
@@ -271,8 +353,9 @@ async def _render(
             intake_clarify_payloads=[opt.payload for opt in response.clarify_options],
         )
         await state.set_state(IntakePending.clarifying)
-        await bot.send_message(
-            chat_id, response.text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        await _replace_status(
+            bot, chat_id, status_msg_id, response.text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
 
 
@@ -320,6 +403,11 @@ async def on_confirm(
     scheduler = data.get("scheduler")
     notify_runner = data.get("notify_runner")
     chat_id = callback.message.chat.id
+    msg_id = callback.message.message_id
+
+    # Replace confirm-card with «⏳ Сохраняю…» so user has visual feedback.
+    await _edit_status(bot, chat_id, msg_id, "⏳ Сохраняю…")
+    await callback.answer()
 
     async with session_scope(factory) as session:
         tz = await settings_service.get_timezone(session)
@@ -337,13 +425,9 @@ async def on_confirm(
         response = await action.execute(ctx, payload)
 
     await state.clear()
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("intake: edit_reply_markup failed: %s", exc)
-    await bot.send_message(chat_id, response.text, reply_markup=response.keyboard)
-    await callback.answer()
+    await _replace_status(
+        bot, chat_id, msg_id, response.text, reply_markup=response.keyboard
+    )
 
 
 @router.callback_query(IntakePending.confirming, IntakeCD.filter(F.action == "cancel"))
@@ -354,12 +438,9 @@ async def on_confirm_cancel(
         await callback.answer()
         return
     await state.clear()
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("intake: edit failed: %s", exc)
-    await bot.send_message(callback.message.chat.id, "❌ Отменено.")
+    await _replace_status(
+        bot, callback.message.chat.id, callback.message.message_id, "❌ Отменено."
+    )
     await callback.answer()
 
 
@@ -374,13 +455,10 @@ async def on_edit(
         await callback.answer()
         return
     await state.clear()
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("intake: edit failed: %s", exc)
-    await bot.send_message(
+    await _replace_status(
+        bot,
         callback.message.chat.id,
+        callback.message.message_id,
         "Открой нужный пункт меню для ручного редактирования (+ Запись / 📋 Записи).",
     )
     await callback.answer()
@@ -424,6 +502,11 @@ async def on_clarify(
     scheduler = data.get("scheduler")
     notify_runner = data.get("notify_runner")
     chat_id = callback.message.chat.id
+    msg_id = callback.message.message_id
+
+    # Replace clarify-card with «⏳ Обрабатываю…» so user has visual feedback.
+    await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю команду…")
+    await callback.answer()
 
     async with session_scope(factory) as session:
         tz = await settings_service.get_timezone(session)
@@ -440,12 +523,6 @@ async def on_clarify(
         )
         response = await action.plan(ctx, args)
 
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("intake: edit failed: %s", exc)
-
     await _render(
         bot=bot,
         chat_id=chat_id,
@@ -453,8 +530,8 @@ async def on_clarify(
         action=action,
         args=args,
         response=response,
+        status_msg_id=msg_id,
     )
-    await callback.answer()
 
 
 @router.callback_query(IntakePending.clarifying, IntakeCD.filter(F.action == "cancel"))
@@ -465,10 +542,7 @@ async def on_clarify_cancel(
         await callback.answer()
         return
     await state.clear()
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("intake: edit failed: %s", exc)
-    await bot.send_message(callback.message.chat.id, "❌ Отменено.")
+    await _replace_status(
+        bot, callback.message.chat.id, callback.message.message_id, "❌ Отменено."
+    )
     await callback.answer()
