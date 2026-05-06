@@ -75,15 +75,34 @@ class ActionResult(str, Enum):
 
 
 @dataclass(frozen=True)
+class ClarifyOption:
+    """One disambiguation choice for an Action's CLARIFY response.
+
+    The handler renders these as inline buttons; when the user picks one,
+    its `payload` is merged into the original args and `Action.plan` is
+    called again. This way the action stays oblivious to FSM tags.
+    """
+
+    label: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ActionResponse:
-    """Return value of `Action.plan` and `Action.execute`."""
+    """Return value of `Action.plan` and `Action.execute`.
+
+    - `EXECUTED`: `text` (+ optional `keyboard` for list/result cards).
+    - `CONFIRM`:  `text` describes what's about to happen; `pending_payload`
+                  is stashed in FSM and passed back to `execute`.
+    - `CLARIFY`:  `text` is the question; `clarify_options` are the user's
+                  choices. Handler builds the keyboard with proper `tag`s.
+    - `FAIL`:     `text` is the error message; nothing else is honoured.
+    """
 
     result: ActionResult
     text: str
     keyboard: InlineKeyboardMarkup | None = None
-    # `pending_payload` is what the handler stashes in FSM data when result is
-    # CONFIRM or CLARIFY — it's passed back to `Action.execute` once the user
-    # confirms, or back to `Action.plan` after disambiguation.
+    clarify_options: list[ClarifyOption] | None = None
     pending_payload: dict[str, Any] | None = None
 
 
