@@ -50,13 +50,18 @@ class IntakePending(StatesGroup):
 
     confirming: action.plan returned CONFIRM, waiting for ✅/✏️/❌.
     clarifying: action.plan returned CLARIFY, waiting for option pick.
-    editing_field_text: user tapped «✏️ Изменить <text-field>» on the
-        confirm-card; the bot is waiting for the next message (text or
-        voice) to use as the new field value.
+    editing_field_picker: user tapped «✏️ Изменить <date|time|client>»
+        on the confirm-card; calendar / time-picker / client-picker is
+        open, waiting for the user's pick. State filters route the pick
+        callback into intake.py instead of the regular handlers.
+    editing_field_text: user tapped «✏️ Изменить <note|instagram>» on
+        the confirm-card; the bot is waiting for the next message
+        (text or voice) to use as the new field value.
     """
 
     confirming = State()
     clarifying = State()
+    editing_field_picker = State()
     editing_field_text = State()
 
 

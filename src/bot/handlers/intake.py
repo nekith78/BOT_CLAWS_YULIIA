@@ -32,8 +32,21 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.bot.callback_data import IntakeCD
+from src.bot.callback_data import (
+    CalendarCD,
+    ClientCD,
+    IntakeCD,
+    TimeCD,
+    TimePartCD,
+)
+from src.bot.keyboards.calendar import calendar_kb
+from src.bot.keyboards.client_picker import client_picker_kb
 from src.bot.keyboards.confirm_card import confirm_card_kb
+from src.bot.keyboards.time_part_picker import (
+    time_hour_picker_kb,
+    time_minute_picker_kb,
+)
+from src.bot.keyboards.time_picker import time_picker_kb
 from src.bot.states import IntakePending
 from src.bot.ui import cancel as ui_cancel
 from src.services import settings_service
@@ -45,9 +58,11 @@ from src.services.intent.types import (
     ActionContext,
     ActionResponse,
     ActionResult,
+    EditableField,
 )
 from src.services.voice.stt import STTProvider
 from src.storage.db import session_scope
+from src.storage.repositories.clients import ClientRepository
 
 log = logging.getLogger(__name__)
 router = Router(name="intake")
@@ -365,6 +380,8 @@ async def _render(
             intake_action=action.name,
             intake_payload=response.pending_payload or {},
             intake_args_so_far=args,
+            intake_editable_fields=_serialize_editable_fields(response.editable_fields),
+            intake_edit_msg_id=status_msg_id,
         )
         await state.set_state(IntakePending.confirming)
         await _replace_status(
@@ -614,5 +631,604 @@ async def on_clarify_cancel(
     await state.clear()
     await _replace_status(
         bot, callback.message.chat.id, callback.message.message_id, "❌ Отменено."
+    )
+    await callback.answer()
+
+
+# ---------- per-field edit ---------------------------------------------------
+#
+# When user taps «✏️ Изменить <field>» on the confirm-card, we open the
+# right editor (calendar / time-picker / client-picker / text-input) on the
+# SAME message. After the user picks/types a new value, we merge it into
+# the action's args, re-call `action.plan()` (no LLM hit), and re-render
+# the confirm-card with the updated value.
+#
+# State machine:
+#   confirming → (tap edit_field) → editing_field_picker (for date/time/client)
+#                                  → editing_field_text   (for note/instagram)
+#   any-edit    → (pick / type / cancel) → confirming
+
+# Special «cancel-back» token used as `back_callback_data` in pickers.
+# Picker keyboards already accept arbitrary callback_data strings — we
+# embed it as `IntakeCD(action="cancel_edit")` so a single handler restores
+# the confirm-card from any of the 3 picker editors.
+
+
+def _editable_field_lookup(
+    fields: list[dict[str, Any]] | None, key: str
+) -> EditableField | None:
+    """FSM-stashed `editable_fields_dump` is a list of dicts (FSM serialises
+    dataclasses through redis as plain dicts). Reconstruct the matching
+    EditableField, returning None when not found."""
+    if not fields:
+        return None
+    for raw in fields:
+        if raw.get("key") == key:
+            return EditableField(
+                key=raw["key"],
+                label=raw["label"],
+                editor=raw["editor"],
+                prompt_text=raw.get("prompt_text"),
+            )
+    return None
+
+
+def _serialize_editable_fields(
+    fields: list[EditableField] | None,
+) -> list[dict[str, Any]] | None:
+    if fields is None:
+        return None
+    return [
+        {
+            "key": f.key,
+            "label": f.label,
+            "editor": f.editor,
+            "prompt_text": f.prompt_text,
+        }
+        for f in fields
+    ]
+
+
+async def _replan_after_edit(
+    *,
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    data: dict[str, Any],
+    field_key: str,
+    new_args_patch: dict[str, Any],
+) -> None:
+    """Merge `new_args_patch` into the in-flight action args, re-call
+    `action.plan()` and re-render the confirm-card on the same message.
+    No LLM call is made — this is purely arg merging + action replay.
+    """
+    if callback.message is None:
+        return
+    fsm = await state.get_data()
+    tag = fsm.get("intake_tag")
+    action_name = fsm.get("intake_action")
+    args_so_far = dict(fsm.get("intake_args_so_far") or {})
+    payload = dict(fsm.get("intake_payload") or {})
+
+    # Carry resolved IDs forward so plan() doesn't redo lookups.
+    if "client_id" in payload and payload["client_id"] is not None:
+        args_so_far["client_id"] = payload["client_id"]
+    if "appointment_id" in payload:
+        args_so_far["appointment_id"] = payload["appointment_id"]
+
+    # Apply the user's edit. The patch already carries field_key+value;
+    # for client_picker it also brings `client_name`.
+    args_so_far.update(new_args_patch)
+    log.info(
+        "intake edit: action=%s field=%s patch=%s",
+        action_name, field_key, new_args_patch,
+    )
+
+    registry = _ensure_registry()
+    action = registry.get(action_name) if action_name else None
+    if action is None:
+        await callback.answer("Команда не найдена.", show_alert=True)
+        await state.clear()
+        return
+
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    scheduler = data.get("scheduler")
+    notify_runner = data.get("notify_runner")
+    chat_id = callback.message.chat.id
+    msg_id = callback.message.message_id
+
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+        now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        ctx = ActionContext(
+            session=session,
+            bot=bot,
+            chat_id=chat_id,
+            state=state,
+            scheduler=scheduler,
+            notify_runner=notify_runner,
+            tz=tz,
+            now_utc=now_utc,
+        )
+        response = await action.plan(ctx, args_so_far)
+
+    if response.result is ActionResult.CONFIRM:
+        await state.update_data(
+            intake_args_so_far=args_so_far,
+            intake_payload=response.pending_payload or {},
+            intake_editable_fields=_serialize_editable_fields(response.editable_fields),
+        )
+        await state.set_state(IntakePending.confirming)
+        await _replace_status(
+            bot, chat_id, msg_id, response.text,
+            reply_markup=confirm_card_kb(
+                tag=str(tag or ""),
+                editable_fields=response.editable_fields,
+            ),
+        )
+    elif response.result is ActionResult.FAIL:
+        # The edit broke something (e.g. past date). Show the error,
+        # keep the previous confirm-card payload so user can try again.
+        await callback.answer(response.text, show_alert=True)
+        await state.set_state(IntakePending.confirming)
+        # Re-render existing confirm-card from FSM (text + payload unchanged).
+        prev_text = (
+            "⚠️ "
+            + response.text
+            + "\n\nВернись к редактированию — старые поля сохранены."
+        )
+        await _replace_status(
+            bot, chat_id, msg_id, prev_text,
+            reply_markup=confirm_card_kb(
+                tag=str(tag or ""),
+                editable_fields=_restore_editable_fields(fsm),
+            ),
+        )
+    else:
+        # CLARIFY mid-edit is rare (e.g. resolve_client suddenly returned
+        # multi-match). Treat like FAIL — alert + keep the old card.
+        await callback.answer(
+            "Изменение поля привело к неоднозначности — отмени и попробуй ещё раз.",
+            show_alert=True,
+        )
+        await state.set_state(IntakePending.confirming)
+
+
+def _restore_editable_fields(fsm_data: dict[str, Any]) -> list[EditableField] | None:
+    raw = fsm_data.get("intake_editable_fields")
+    if not raw:
+        return None
+    return [
+        EditableField(
+            key=item["key"],
+            label=item["label"],
+            editor=item["editor"],
+            prompt_text=item.get("prompt_text"),
+        )
+        for item in raw
+    ]
+
+
+@router.callback_query(IntakePending.confirming, IntakeCD.filter(F.action == "edit_field"))
+async def on_edit_field(
+    callback: CallbackQuery,
+    callback_data: IntakeCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    """User tapped «✏️ Изменить <field>». Open the matching editor on
+    the same message and switch to the appropriate edit-state."""
+    if callback.message is None:
+        await callback.answer()
+        return
+
+    fsm = await state.get_data()
+    if fsm.get("intake_tag") != callback_data.tag:
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+
+    fields_raw = fsm.get("intake_editable_fields") or []
+    field = _editable_field_lookup(fields_raw, callback_data.field)
+    if field is None:
+        await callback.answer("Это поле уже нельзя править.", show_alert=True)
+        return
+
+    chat_id = callback.message.chat.id
+    msg_id = callback.message.message_id
+
+    # Stash editing meta so picker callbacks know which field they answer.
+    await state.update_data(
+        intake_editing_field=callback_data.field,
+    )
+
+    if field.editor == "calendar":
+        anchor_date = _extract_anchor_date(fsm) or datetime.now(timezone.utc).date()
+        cancel_cd = IntakeCD(action="cancel_edit", tag=callback_data.tag).pack()
+        await _replace_status(
+            bot, chat_id, msg_id,
+            f"📅 Выбери новую {field.label.lower()}:",
+            reply_markup=calendar_kb(
+                anchor=anchor_date,
+                back_callback_data=cancel_cd,
+            ),
+        )
+        await state.set_state(IntakePending.editing_field_picker)
+    elif field.editor == "time_picker":
+        await _replace_status(
+            bot, chat_id, msg_id,
+            f"🕐 Выбери новое {field.label.lower()}:",
+            reply_markup=time_picker_kb(),
+        )
+        await state.set_state(IntakePending.editing_field_picker)
+    elif field.editor == "client_picker":
+        factory = cast(async_sessionmaker[Any], data["session_factory"])
+        async with session_scope(factory) as session:
+            recent = await ClientRepository(session).list_recent(limit=10)
+        await _replace_status(
+            bot, chat_id, msg_id,
+            "👤 Выбери клиента:",
+            reply_markup=client_picker_kb(recent=recent),
+        )
+        await state.set_state(IntakePending.editing_field_picker)
+    elif field.editor == "text_input":
+        prompt = field.prompt_text or f"Напиши новое значение для {field.label.lower()}:"
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена",
+                        callback_data=IntakeCD(
+                            action="cancel_edit", tag=callback_data.tag
+                        ).pack(),
+                    )
+                ]
+            ]
+        )
+        await _replace_status(
+            bot, chat_id, msg_id, prompt, reply_markup=cancel_kb
+        )
+        await state.set_state(IntakePending.editing_field_text)
+
+    await callback.answer()
+
+
+def _extract_anchor_date(fsm: dict[str, Any]) -> Any:
+    """Pull the calendar anchor from the action's current args/payload —
+    falls back to today when nothing useful is there."""
+    from datetime import date
+
+    args = fsm.get("intake_args_so_far") or {}
+    for key in ("date", "new_date"):
+        val = args.get(key)
+        if isinstance(val, str):
+            try:
+                return date.fromisoformat(val)
+            except ValueError:
+                continue
+    return None
+
+
+# --- picker pick handlers (state filtered to editing_field_picker) -----
+
+
+@router.callback_query(IntakePending.editing_field_picker, CalendarCD.filter(F.action == "pick"))
+async def on_edit_calendar_pick(
+    callback: CallbackQuery,
+    callback_data: CalendarCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    fsm = await state.get_data()
+    field_key = fsm.get("intake_editing_field")
+    if not field_key:
+        await callback.answer()
+        return
+    await _replan_after_edit(
+        callback=callback,
+        state=state,
+        bot=bot,
+        data=data,
+        field_key=field_key,
+        new_args_patch={field_key: callback_data.iso_date},
+    )
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.editing_field_picker, CalendarCD.filter(F.action == "nav"))
+async def on_edit_calendar_nav(
+    callback: CallbackQuery,
+    callback_data: CalendarCD,
+    state: FSMContext,
+    bot: Bot,
+    **_: Any,
+) -> None:
+    """Month nav inside the edit calendar — re-render with the new anchor."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    from datetime import date, timedelta
+
+    anchor = date.fromisoformat(callback_data.iso_date)
+    delta = -1 if callback_data.nav == "prev" else 32
+    new_anchor = (anchor + timedelta(days=delta)).replace(day=1)
+    fsm = await state.get_data()
+    cancel_cd = IntakeCD(action="cancel_edit", tag=str(fsm.get("intake_tag") or "")).pack()
+    await _replace_status(
+        bot, callback.message.chat.id, callback.message.message_id,
+        "📅 Выбери новую дату:",
+        reply_markup=calendar_kb(anchor=new_anchor, back_callback_data=cancel_cd),
+    )
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.editing_field_picker, CalendarCD.filter(F.action == "noop"))
+async def on_edit_calendar_noop(callback: CallbackQuery, **_: Any) -> None:
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.editing_field_picker, TimeCD.filter())
+async def on_edit_time_pick(
+    callback: CallbackQuery,
+    callback_data: TimeCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    """Time grid pick — either a direct HH:MM or 'custom' which opens the
+    hour-then-minute fallback."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    fsm = await state.get_data()
+    field_key = fsm.get("intake_editing_field")
+    if not field_key:
+        await callback.answer()
+        return
+    if callback_data.hhmm == "custom":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+        await callback.answer()
+        return
+    await _replan_after_edit(
+        callback=callback,
+        state=state,
+        bot=bot,
+        data=data,
+        field_key=field_key,
+        new_args_patch={field_key: callback_data.hhmm},
+    )
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.editing_field_picker, TimePartCD.filter())
+async def on_edit_time_part(
+    callback: CallbackQuery,
+    callback_data: TimePartCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    """Hybrid hour→minute picker for «другое время»."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    if callback_data.action == "hour":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            f"Минуты для {callback_data.hh:02d}:__",
+            reply_markup=time_minute_picker_kb(hh=callback_data.hh),
+        )
+    elif callback_data.action == "minute":
+        fsm = await state.get_data()
+        field_key = fsm.get("intake_editing_field")
+        if not field_key:
+            await callback.answer()
+            return
+        hhmm = f"{callback_data.hh:02d}:{callback_data.mm:02d}"
+        await _replan_after_edit(
+            callback=callback, state=state, bot=bot, data=data,
+            field_key=field_key, new_args_patch={field_key: hhmm},
+        )
+    elif callback_data.action == "back_to_hours":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери час:", reply_markup=time_hour_picker_kb(),
+        )
+    elif callback_data.action == "back_to_grid":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери время:", reply_markup=time_picker_kb(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.editing_field_picker, ClientCD.filter(F.action == "pick"))
+async def on_edit_client_pick(
+    callback: CallbackQuery,
+    callback_data: ClientCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    fsm = await state.get_data()
+    field_key = fsm.get("intake_editing_field")
+    if not field_key:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        client = await ClientRepository(session).get(callback_data.client_id)
+    if client is None:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+    # client_picker fields update both client_id and client_name in args.
+    await _replan_after_edit(
+        callback=callback, state=state, bot=bot, data=data,
+        field_key=field_key,
+        new_args_patch={field_key: client.name, "client_id": client.id},
+    )
+    await callback.answer()
+
+
+# --- text-input handlers (state filtered to editing_field_text) --------
+
+
+@router.message(IntakePending.editing_field_text, F.text)
+async def on_edit_text_input(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """Bot is waiting for a text/voice value for a text_input field.
+    Plain text → use as value directly."""
+    if message.text is None:
+        return
+    text = message.text.strip()
+    if not text:
+        return
+    await _commit_text_field_edit(
+        message=message, state=state, bot=bot, data=data, value=text
+    )
+
+
+@router.message(IntakePending.editing_field_text, F.voice)
+async def on_edit_voice_input(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """Voice during text-edit mode: transcribe via STT and use the
+    transcript as the field value (same path as text input)."""
+    if message.voice is None:
+        return
+    settings = data.get("settings")
+    stt: STTProvider | None = data.get("stt")
+    if stt is None or settings is None:
+        return
+    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
+        await bot.send_message(
+            message.chat.id,
+            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
+        )
+        return
+    file = await bot.get_file(message.voice.file_id)
+    if file.file_path is None:
+        return
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, buf)
+    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    if not transcript:
+        await bot.send_message(message.chat.id, "Не услышал ничего, попробуй ещё раз.")
+        return
+    await _commit_text_field_edit(
+        message=message, state=state, bot=bot, data=data, value=transcript
+    )
+
+
+async def _commit_text_field_edit(
+    *,
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    data: dict[str, Any],
+    value: str,
+) -> None:
+    """Shared text-input merge path. Constructs a fake CallbackQuery-like
+    target to reuse `_replan_after_edit` — simpler than duplicating the
+    helper."""
+    fsm = await state.get_data()
+    field_key = fsm.get("intake_editing_field")
+    confirm_msg_id = fsm.get("intake_edit_msg_id") or fsm.get("intake_edit_origin_msg_id")
+    if not field_key:
+        return
+
+    # We need the original confirm-card message id to edit. Stored at
+    # the start of the edit flow as `intake_edit_msg_id`. Fall back: send
+    # a new message if missing.
+    chat_id = message.chat.id
+
+    # Build a callback-like context for the helper. Simpler: inline the
+    # replan logic since `_replan_after_edit` expects a CallbackQuery.
+    args_so_far = dict(fsm.get("intake_args_so_far") or {})
+    payload = dict(fsm.get("intake_payload") or {})
+    if "client_id" in payload and payload["client_id"] is not None:
+        args_so_far["client_id"] = payload["client_id"]
+    if "appointment_id" in payload:
+        args_so_far["appointment_id"] = payload["appointment_id"]
+    args_so_far[field_key] = value
+    log.info("intake edit (text): field=%s value=%r", field_key, value)
+
+    registry = _ensure_registry()
+    action_name = fsm.get("intake_action")
+    action = registry.get(action_name) if action_name else None
+    if action is None:
+        await state.clear()
+        await bot.send_message(chat_id, "Команда не найдена.")
+        return
+
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    scheduler = data.get("scheduler")
+    notify_runner = data.get("notify_runner")
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+        now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        ctx = ActionContext(
+            session=session, bot=bot, chat_id=chat_id, state=state,
+            scheduler=scheduler, notify_runner=notify_runner,
+            tz=tz, now_utc=now_utc,
+        )
+        response = await action.plan(ctx, args_so_far)
+
+    tag = str(fsm.get("intake_tag") or "")
+    if response.result is ActionResult.CONFIRM:
+        await state.update_data(
+            intake_args_so_far=args_so_far,
+            intake_payload=response.pending_payload or {},
+            intake_editable_fields=_serialize_editable_fields(response.editable_fields),
+        )
+        await state.set_state(IntakePending.confirming)
+        if confirm_msg_id:
+            await _replace_status(
+                bot, chat_id, int(confirm_msg_id), response.text,
+                reply_markup=confirm_card_kb(
+                    tag=tag, editable_fields=response.editable_fields
+                ),
+            )
+        else:
+            sent = await bot.send_message(
+                chat_id, response.text,
+                reply_markup=confirm_card_kb(
+                    tag=tag, editable_fields=response.editable_fields
+                ),
+            )
+            await state.update_data(intake_edit_msg_id=sent.message_id)
+    else:
+        await bot.send_message(chat_id, f"⚠️ {response.text}")
+        await state.set_state(IntakePending.confirming)
+
+
+# --- cancel-edit (works for both picker and text edit states) ---------
+
+
+@router.callback_query(
+    IntakePending.editing_field_picker, IntakeCD.filter(F.action == "cancel_edit")
+)
+@router.callback_query(
+    IntakePending.editing_field_text, IntakeCD.filter(F.action == "cancel_edit")
+)
+async def on_cancel_edit(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """User pressed «❌ Отмена» inside an editor sub-flow — restore the
+    confirm-card with original args, no merge applied. We just re-call
+    `_replan_after_edit` with an empty patch — it'll re-render the same
+    card from current FSM args."""
+    await _replan_after_edit(
+        callback=callback, state=state, bot=bot, data=data,
+        field_key="", new_args_patch={},
     )
     await callback.answer()
