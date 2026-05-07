@@ -38,6 +38,8 @@ class CreateAppointmentAction:
         "«запиши Иру на завтра в 14:30», «запиши клиента Х на 8 мая в 11:00»."
     )
     confirm_required: ClassVar[bool] = True
+    confirm_label: ClassVar[str] = "✅ Сохранить"
+    cancel_label: ClassVar[str] = "❌ Отменить"
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

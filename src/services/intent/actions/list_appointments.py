@@ -40,6 +40,8 @@ class ListAppointmentsAction:
         "ничего не меняет в БД."
     )
     confirm_required: ClassVar[bool] = False
+    confirm_label: ClassVar[str] = "✅ Сохранить"
+    cancel_label: ClassVar[str] = "❌ Отменить"
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

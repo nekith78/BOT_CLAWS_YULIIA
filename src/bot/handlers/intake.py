@@ -392,7 +392,7 @@ async def _render(
         await state.set_state(IntakePending.confirming)
         await _replace_status(
             bot, chat_id, status_msg_id, response.text,
-            reply_markup=confirm_card_kb(tag=tag),
+            reply_markup=_confirm_kb_for(action, tag, response.editable_fields),
         )
         return
     if response.result is ActionResult.CLARIFY:
@@ -447,6 +447,35 @@ def _llm_error_text(exc: Exception) -> str:
             "попробуй завтра или сделай кнопками."
         )
     return "🤖 Не могу разобрать команду — попробуй ещё раз или сделай кнопками."
+
+
+def _confirm_kb_for(
+    action: Action, tag: str, editable_fields: list[EditableField] | None
+) -> Any:
+    """Build the confirm-card keyboard with labels declared by the action.
+    Drops the «Изменить» button when the action exposes no editable
+    fields (cancel / delete / etc.)."""
+    return confirm_card_kb(
+        tag=tag,
+        confirm_label=getattr(action, "confirm_label", "✅ Сохранить"),
+        cancel_label=getattr(action, "cancel_label", "❌ Отменить"),
+        show_edit=bool(editable_fields),
+    )
+
+
+def _confirm_kb_from_fsm(
+    fsm: dict[str, Any], tag: str
+) -> Any:
+    """Same as `_confirm_kb_for` but reads the action by name from FSM
+    data — used by re-render paths (cancel-edit, back-to-confirm) where
+    we don't have the action reference handy."""
+    action_name = fsm.get("intake_action")
+    registry = _ensure_registry()
+    action = registry.get(action_name) if action_name else None
+    fields = _restore_editable_fields(fsm)
+    if action is None:
+        return confirm_card_kb(tag=tag)
+    return _confirm_kb_for(action, tag, fields)
 
 
 def _help_text() -> str:
@@ -804,7 +833,7 @@ async def _replan_after_edit(
         await state.set_state(IntakePending.confirming)
         await _replace_status(
             bot, chat_id, msg_id, response.text,
-            reply_markup=confirm_card_kb(tag=str(tag or "")),
+            reply_markup=_confirm_kb_for(action, str(tag or ""), response.editable_fields),
         )
     elif response.result is ActionResult.FAIL:
         # The edit broke something (e.g. past date). Show the error,
@@ -819,7 +848,7 @@ async def _replan_after_edit(
         )
         await _replace_status(
             bot, chat_id, msg_id, prev_text,
-            reply_markup=confirm_card_kb(tag=str(tag or "")),
+            reply_markup=_confirm_kb_for(action, str(tag or ""), _restore_editable_fields(fsm)),
         )
     else:
         # CLARIFY mid-edit is rare (e.g. resolve_client suddenly returned
@@ -1230,16 +1259,13 @@ async def _commit_text_field_edit(
             intake_editable_fields=_serialize_editable_fields(response.editable_fields),
         )
         await state.set_state(IntakePending.confirming)
+        kb = _confirm_kb_for(action, tag, response.editable_fields)
         if confirm_msg_id:
             await _replace_status(
-                bot, chat_id, int(confirm_msg_id), response.text,
-                reply_markup=confirm_card_kb(tag=tag),
+                bot, chat_id, int(confirm_msg_id), response.text, reply_markup=kb,
             )
         else:
-            sent = await bot.send_message(
-                chat_id, response.text,
-                reply_markup=confirm_card_kb(tag=tag),
-            )
+            sent = await bot.send_message(chat_id, response.text, reply_markup=kb)
             await state.update_data(intake_edit_msg_id=sent.message_id)
     else:
         await bot.send_message(chat_id, f"⚠️ {response.text}")

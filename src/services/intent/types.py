@@ -167,6 +167,12 @@ class Action(Protocol):
     description: ClassVar[str]
     confirm_required: ClassVar[bool]
     params_schema: ClassVar[dict[str, Any]]
+    # Confirm-card button labels, action-specific. Defaults below match
+    # save-style flows (create_appointment etc.); destructive actions
+    # like delete_client / cancel_appointment override them so the user
+    # never sees «Сохранить» on a delete.
+    confirm_label: ClassVar[str]
+    cancel_label: ClassVar[str]
 
     async def plan(self, ctx: ActionContext, args: dict[str, Any]) -> ActionResponse: ...
     async def execute(self, ctx: ActionContext, payload: dict[str, Any]) -> ActionResponse: ...

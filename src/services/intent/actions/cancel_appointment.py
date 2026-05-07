@@ -25,6 +25,8 @@ class CancelAppointmentAction:
         "«отмени Иру на завтра», «отмени запись на 16 мая в 14:00»."
     )
     confirm_required: ClassVar[bool] = True
+    confirm_label: ClassVar[str] = "✅ Отменить запись"
+    cancel_label: ClassVar[str] = "⬅️ Назад"
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

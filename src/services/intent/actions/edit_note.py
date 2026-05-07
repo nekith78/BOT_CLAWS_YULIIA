@@ -26,6 +26,8 @@ class EditNoteAction:
         "«заметка для Иры завтра: гель»."
     )
     confirm_required: ClassVar[bool] = True
+    confirm_label: ClassVar[str] = "✅ Сохранить"
+    cancel_label: ClassVar[str] = "❌ Отменить"
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

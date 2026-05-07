@@ -24,6 +24,8 @@ class DeleteClientAction:
         "перед фактическим удалением требует явного подтверждения."
     )
     confirm_required: ClassVar[bool] = True
+    confirm_label: ClassVar[str] = "🗑 Удалить"
+    cancel_label: ClassVar[str] = "⬅️ Назад"
     params_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
