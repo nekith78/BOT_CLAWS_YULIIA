@@ -15,14 +15,20 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.services.intent.text_normalizer import (
+    NormalizationResult,
+    build_canonical,
+    compute_missing,
+    decide_next,
     denormalize_forms,
     detect_verb,
+    extract,
     extract_instagram,
     extract_name_candidate,
     extract_note,
     levenshtein,
     resolve_client_candidate,
 )
+from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
 
 
@@ -269,3 +275,252 @@ async def test_resolve_no_match_returns_first_form(session: AsyncSession) -> Non
     name, cid = await resolve_client_candidate("Юлю", repo)
     assert name == "Юля"
     assert cid is None
+
+
+# --- compute_missing -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verb, entities, expected_missing",
+    [
+        # create — needs name, date, time
+        ("create_appointment", {"name": "Ира", "date": "2026-05-08", "time": "14:30"}, []),
+        ("create_appointment", {"name": "Ира", "date": "2026-05-08"}, ["time"]),
+        ("create_appointment", {"name": "Ира"}, ["date", "time"]),
+        ("create_appointment", {}, ["name", "date", "time"]),
+        # update_note — needs appointment_id + note_text
+        ("edit_note", {"appointment_id": 42, "note_text": "френч"}, []),
+        ("edit_note", {"appointment_id": 42}, ["note_text"]),
+        ("edit_note", {}, ["appointment_ref", "note_text"]),
+        # cancel — only appointment_ref
+        ("cancel_appointment", {"appointment_id": 42}, []),
+        ("cancel_appointment", {}, ["appointment_ref"]),
+        # move — appointment_ref + (new_date OR new_time)
+        ("move_appointment", {"appointment_id": 42, "new_time": "16:00"}, []),
+        ("move_appointment", {"appointment_id": 42, "new_date": "2026-05-09"}, []),
+        ("move_appointment", {"appointment_id": 42}, ["new_date_or_time"]),
+        # delete_client — client_id only
+        ("delete_client", {"client_id": 7}, []),
+        ("delete_client", {}, ["client_id"]),
+        # list_* — nothing required
+        ("list_appointments", {}, []),
+        ("list_clients", {}, []),
+    ],
+)
+def test_compute_missing(
+    verb: str, entities: dict[str, str | int], expected_missing: list[str]
+) -> None:
+    assert compute_missing(verb, entities) == expected_missing
+
+
+# --- build_canonical -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verb, entities, expected",
+    [
+        (
+            "create_appointment",
+            {"name": "Ира", "date": "2026-05-08", "time": "14:30"},
+            "запиши Ира на 2026-05-08 в 14:30",
+        ),
+        (
+            "create_appointment",
+            {
+                "name": "Ира",
+                "date": "2026-05-08",
+                "time": "14:30",
+                "note": "френч",
+            },
+            "запиши Ира на 2026-05-08 в 14:30 с заметкой френч",
+        ),
+        (
+            "create_appointment",
+            {
+                "name": "Ира",
+                "date": "2026-05-08",
+                "time": "14:30",
+                "note": "френч",
+                "instagram": "@ira_nails",
+            },
+            "запиши Ира на 2026-05-08 в 14:30 с заметкой френч инстаграм @ira_nails",
+        ),
+        (
+            "cancel_appointment",
+            {
+                "name": "Ира",
+                "date": "2026-05-08",
+                "time": "14:00",
+                "appointment_id": 42,
+            },
+            "отмени запись Ира 2026-05-08 14:00",
+        ),
+        (
+            "move_appointment",
+            {
+                "name": "Ира",
+                "date": "2026-05-08",
+                "time": "14:00",
+                "appointment_id": 42,
+                "new_date": "2026-05-09",
+                "new_time": "16:00",
+            },
+            "перенеси запись Ира 2026-05-08 14:00 на 2026-05-09 в 16:00",
+        ),
+        (
+            "edit_note",
+            {
+                "name": "Ира",
+                "date": "2026-05-08",
+                "time": "14:00",
+                "appointment_id": 42,
+                "note_text": "френч",
+            },
+            "добавь к записи Ира 2026-05-08 14:00 заметку: френч",
+        ),
+        (
+            "list_appointments",
+            {"date": "2026-05-08"},
+            "покажи записи на 2026-05-08",
+        ),
+        ("list_appointments", {}, "покажи все записи"),
+        ("list_clients", {}, "покажи всех клиентов"),
+        (
+            "delete_client",
+            {"name": "Ира", "client_id": 7},
+            "удали клиента Ира",
+        ),
+    ],
+)
+def test_build_canonical(
+    verb: str, entities: dict[str, str | int], expected: str
+) -> None:
+    assert build_canonical(verb, entities) == expected
+
+
+# --- extract end-to-end ----------------------------------------------------
+
+
+async def test_extract_full_create(session: AsyncSession) -> None:
+    """Two-pass pipeline on a full create command."""
+    repo = ClientRepository(session)
+    await repo.create(name="Ира")
+    appt_repo = AppointmentRepository(session)
+
+    from datetime import date as _date
+    today = _date(2026, 5, 7)
+    entities = await extract(
+        "запиши Иру на завтра в 14:30 заметка френч инстаграм @ira_nails",
+        today,
+        repo,
+        appt_repo,
+    )
+
+    assert entities["verb"] == "create_appointment"
+    assert entities["name"] == "Ира"
+    assert entities["client_id"] is not None
+    assert entities["date"] == "2026-05-08"
+    assert entities["time"] == "14:30"
+    assert entities["note"] == "френч"
+    assert entities["instagram"] == "@ira_nails"
+
+
+async def test_extract_no_verb(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    from datetime import date as _date
+    entities = await extract("привет", _date(2026, 5, 7), repo, appt_repo)
+    assert entities == {}
+
+
+async def test_extract_cancel_partial(session: AsyncSession) -> None:
+    """«отмени завтрашнюю» → verb + date, no name."""
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    from datetime import date as _date
+    entities = await extract(
+        "отмени завтрашнюю запись", _date(2026, 5, 7), repo, appt_repo
+    )
+    assert entities["verb"] == "cancel_appointment"
+    assert entities["date"] == "2026-05-08"
+    assert entities.get("name") is None
+
+
+# --- decide_next end-to-end ------------------------------------------------
+
+
+async def test_decide_next_no_verb(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    from datetime import date as _date
+    result = await decide_next({}, _date(2026, 5, 7), repo, appt_repo)
+    assert result.kind == "no_verb_detected"
+
+
+async def test_decide_next_canonical_ready(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    from datetime import date as _date
+    entities = {
+        "verb": "create_appointment",
+        "name": "Ира",
+        "date": "2026-05-08",
+        "time": "14:30",
+    }
+    result = await decide_next(entities, _date(2026, 5, 7), repo, appt_repo)
+    assert result.kind == "canonical_ready"
+    assert result.canonical_text == "запиши Ира на 2026-05-08 в 14:30"
+
+
+async def test_decide_next_clarifies_appointment_ref(session: AsyncSession) -> None:
+    """Cancel without a known appointment, two candidates on date → CLARIFY."""
+    from datetime import date as _date
+    from datetime import datetime, timezone
+    from datetime import time as _time
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Almaty")
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+
+    irene = await repo.create(name="Ира")
+    masha = await repo.create(name="Маша")
+    for d, hh in [(8, 10), (8, 14)]:
+        local = datetime.combine(_date(2026, 5, d), _time(hh, 0), tzinfo=tz)
+        utc = local.astimezone(timezone.utc).replace(tzinfo=None)
+        await appt_repo.create(
+            client_id=irene.id if hh == 10 else masha.id, starts_at=utc
+        )
+
+    entities = {
+        "verb": "cancel_appointment",
+        "date": "2026-05-08",
+    }
+    result = await decide_next(entities, _date(2026, 5, 7), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.field == "appointment_ref"
+    assert result.question.editor == "appointment_picker"
+    assert result.question.options is not None
+    assert len(result.question.options) == 2
+
+
+async def test_decide_next_asks_for_note_text(session: AsyncSession) -> None:
+    """edit_note with appointment_id but no note_text → text-input question."""
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    from datetime import date as _date
+    entities = {"verb": "edit_note", "appointment_id": 42}
+    result = await decide_next(entities, _date(2026, 5, 7), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.field == "note_text"
+    assert result.question.editor == "text_input"
+
+
+# Sanity — NormalizationResult is exposed.
+def test_normalization_result_dataclass() -> None:
+    r = NormalizationResult(kind="no_verb_detected")
+    assert r.kind == "no_verb_detected"
+    assert r.canonical_text is None
+    assert r.question is None

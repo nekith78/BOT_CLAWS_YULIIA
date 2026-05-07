@@ -18,9 +18,17 @@ Pure functions only — no aiogram imports, no LLM imports.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from datetime import date as _date
+from datetime import datetime, timezone
+from datetime import time as _time
+from typing import TYPE_CHECKING, Any, Literal
+
+from src.bot.parsers import parse_time_from_text
+from src.bot.relative_date import parse_relative_date
 
 if TYPE_CHECKING:
+    from src.storage.repositories.appointments import AppointmentRepository
     from src.storage.repositories.clients import ClientRepository
 
 # --- vocabulary ------------------------------------------------------------
@@ -456,4 +464,383 @@ async def resolve_client_candidate(
     # Index 0 is the candidate as-is; index 1+ are denormalised. Prefer 1
     # if denormalisation produced anything, else fall back to 0.
     return (forms[1] if len(forms) > 1 else forms[0]), None
+
+
+# --- orchestration: extract, compute_missing, decide_next, build_canonical -
+
+
+@dataclass(frozen=True)
+class ClarifyOption:
+    """One choice in a needs_clarification question. `value` is what the
+    bot merges into `entities` when the user picks this option — for the
+    appointment picker that's a dict carrying appointment_id + resolved
+    name/date/time so the canonical builder has everything."""
+
+    label: str
+    value: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClarifyQuestion:
+    field: Literal[
+        "appointment_ref",
+        "note_text",
+        "client",
+        "date",
+        "time",
+        "new_date",
+        "new_time",
+    ]
+    prompt: str
+    editor: Literal[
+        "calendar",
+        "time_picker",
+        "appointment_picker",
+        "client_picker",
+        "text_input",
+    ]
+    options: list[ClarifyOption] | None = None
+
+
+@dataclass(frozen=True)
+class NormalizationResult:
+    kind: Literal["canonical_ready", "needs_clarification", "no_verb_detected"]
+    canonical_text: str | None = None
+    question: ClarifyQuestion | None = None
+
+
+# Verb → required-fields list. `appointment_ref` is a virtual marker —
+# decide_next resolves it against the DB before asking the user.
+_VERB_REQUIRES: dict[str, tuple[str, ...]] = {
+    "create_appointment": ("name", "date", "time"),
+    "cancel_appointment": ("appointment_ref",),
+    "move_appointment": ("appointment_ref", "new_date_or_time"),
+    "edit_note": ("appointment_ref", "note_text"),
+    "delete_client": ("client_id",),
+    "list_appointments": (),
+    "list_clients": (),
+}
+
+
+def compute_missing(verb: str, entities: dict[str, Any]) -> list[str]:
+    """Return the ORDERED list of fields still needed for `verb` given
+    what's in `entities`. Pure — no DB access."""
+    required = _VERB_REQUIRES.get(verb, ())
+    missing: list[str] = []
+    for field in required:
+        if field == "appointment_ref":
+            if not entities.get("appointment_id"):
+                missing.append("appointment_ref")
+        elif field == "new_date_or_time":
+            if not entities.get("new_date") and not entities.get("new_time"):
+                missing.append("new_date_or_time")
+        elif field == "client_id":
+            if not entities.get("client_id"):
+                missing.append("client_id")
+        else:
+            if not entities.get(field):
+                missing.append(field)
+    return missing
+
+
+def build_canonical(verb: str, entities: dict[str, Any]) -> str:
+    """Render a clean Russian sentence for LLM #2. Templates per spec §3.7."""
+    name = entities.get("name") or ""
+    date = entities.get("date") or ""
+    time_ = entities.get("time") or ""
+    note = entities.get("note") or ""
+    note_text = entities.get("note_text") or ""
+    insta = entities.get("instagram") or ""
+    new_date = entities.get("new_date") or ""
+    new_time = entities.get("new_time") or ""
+
+    if verb == "create_appointment":
+        parts = [f"запиши {name} на {date} в {time_}"]
+        if note:
+            parts.append(f"с заметкой {note}")
+        if insta:
+            parts.append(f"инстаграм {insta}")
+        return " ".join(parts)
+    if verb == "cancel_appointment":
+        return f"отмени запись {name} {date} {time_}".rstrip()
+    if verb == "move_appointment":
+        target = []
+        if new_date:
+            target.append(new_date)
+        if new_time:
+            target.append(f"в {new_time}")
+        target_str = " ".join(target)
+        return f"перенеси запись {name} {date} {time_} на {target_str}"
+    if verb == "edit_note":
+        return f"добавь к записи {name} {date} {time_} заметку: {note_text}"
+    if verb == "list_appointments":
+        return f"покажи записи на {date}" if date else "покажи все записи"
+    if verb == "list_clients":
+        return "покажи всех клиентов"
+    if verb == "delete_client":
+        return f"удали клиента {name}"
+    return ""
+
+
+async def extract(
+    text: str,
+    today_local: _date,
+    repo: ClientRepository,
+    appt_repo: AppointmentRepository,
+) -> dict[str, Any]:
+    """Pass-1+pass-2 extraction on raw transcript. Returns `{}` if no
+    verb was detected; otherwise a dict with at minimum `verb` plus any
+    detected entities (name/client_id/date/time/note/instagram)."""
+    if not text:
+        return {}
+
+    # Strip Instagram FIRST — IG markers are unambiguous, and note text
+    # (which is free-form) might otherwise swallow «инстаграм X» as part
+    # of the note tail.
+    instagram, after_ig = extract_instagram(text)
+    note, after_note = extract_note(after_ig)
+    cleaned = after_note
+
+    verb = detect_verb(cleaned)
+    if verb is None:
+        return {}
+
+    iso_date = parse_relative_date(cleaned, today_local)
+    hhmm = parse_time_from_text(cleaned)
+
+    name_candidate = extract_name_candidate(cleaned, verb)
+    name: str | None = None
+    client_id: int | None = None
+    if name_candidate:
+        name, client_id = await resolve_client_candidate(name_candidate, repo)
+
+    entities: dict[str, Any] = {"verb": verb}
+    if name is not None:
+        entities["name"] = name
+    if client_id is not None:
+        entities["client_id"] = client_id
+    if iso_date:
+        entities["date"] = iso_date
+    if hhmm:
+        entities["time"] = hhmm
+    if note:
+        entities["note"] = note
+    if instagram:
+        entities["instagram"] = instagram
+    return entities
+
+
+async def decide_next(
+    entities: dict[str, Any],
+    today_local: _date,
+    repo: ClientRepository,
+    appt_repo: AppointmentRepository,
+) -> NormalizationResult:
+    """Compute the next step: build canonical, ask a clarifying question,
+    or report no-verb. Stateless — the bot persists `entities` between
+    calls and merges the user's answer in before calling again."""
+    verb = entities.get("verb")
+    if not verb:
+        return NormalizationResult(kind="no_verb_detected")
+
+    # Try to resolve appointment_ref against the DB before asking.
+    if (
+        verb in {"cancel_appointment", "move_appointment", "edit_note"}
+        and not entities.get("appointment_id")
+    ):
+        await _try_resolve_appointment_ref(
+            entities, today_local, repo, appt_repo
+        )
+
+    missing = compute_missing(verb, entities)
+    if not missing:
+        return NormalizationResult(
+            kind="canonical_ready",
+            canonical_text=build_canonical(verb, entities),
+        )
+
+    # Ask for the FIRST missing entity (ordered by `_VERB_REQUIRES`).
+    next_field = missing[0]
+    question = await _build_question(next_field, entities, repo, appt_repo)
+    return NormalizationResult(
+        kind="needs_clarification",
+        question=question,
+    )
+
+
+# --- internal helpers used by decide_next ---------------------------------
+
+
+async def _try_resolve_appointment_ref(
+    entities: dict[str, Any],
+    today_local: _date,
+    repo: ClientRepository,
+    appt_repo: AppointmentRepository,
+) -> None:
+    """If exactly one DB appointment matches the (name, date) hints, fill
+    appointment_id + name/date/time so the canonical builder has them."""
+    name = entities.get("name")
+    date_iso = entities.get("date")
+    candidates = await _list_candidate_appointments(
+        name=name, date_iso=date_iso, repo=repo, appt_repo=appt_repo
+    )
+    if len(candidates) == 1:
+        a = candidates[0]
+        client = await repo.get(a.client_id)
+        local = a.starts_at.replace(tzinfo=timezone.utc)
+        # We don't know `tz` here — appt_repo stores naive UTC. Keep it
+        # simple: serialize as UTC date+time. Bot layer can render local
+        # for display; LLM #2 only needs unique reference.
+        entities["appointment_id"] = a.id
+        if client and not entities.get("name"):
+            entities["name"] = client.name
+        entities["date"] = local.date().isoformat()
+        entities["time"] = local.strftime("%H:%M")
+
+
+async def _list_candidate_appointments(
+    *,
+    name: str | None,
+    date_iso: str | None,
+    repo: ClientRepository,
+    appt_repo: AppointmentRepository,
+) -> list[Any]:
+    """Pick candidate appointments based on the entity hints we have."""
+    # If a date is given, list that day's appointments and filter by name
+    # afterward (DB list_for_date returns naive UTC — caller pretends UTC
+    # is local, which is fine for the candidate-set heuristic).
+    if date_iso:
+        try:
+            d = _date.fromisoformat(date_iso)
+        except ValueError:
+            return []
+        # Use a UTC-naive zone to avoid a tz dependency at this layer.
+        # The bot caller invokes decide_next with today_local in its own tz;
+        # for selection we use the local-day window relative to that tz on
+        # the UI layer, but for candidate-counting any conservative window
+        # works. Read upcoming and filter by date to keep this stateless.
+        all_upcoming = await appt_repo.list_upcoming(
+            now=datetime.combine(d, _time(0, 0)), limit=200
+        )
+        on_date = [
+            a for a in all_upcoming if a.starts_at.date() == d
+        ]
+        if name:
+            client = await repo.find_by_name_ci(name)
+            if client:
+                on_date = [a for a in on_date if a.client_id == client.id]
+        return on_date
+
+    # No date — fall back to upcoming, possibly narrowed by name.
+    upcoming = await appt_repo.list_upcoming(
+        now=datetime.utcnow(), limit=20
+    )
+    if name:
+        client = await repo.find_by_name_ci(name)
+        if client:
+            upcoming = [a for a in upcoming if a.client_id == client.id]
+    return upcoming
+
+
+async def _build_question(
+    next_field: str,
+    entities: dict[str, Any],
+    repo: ClientRepository,
+    appt_repo: AppointmentRepository,
+) -> ClarifyQuestion:
+    """Translate a missing-field marker into a concrete user question."""
+    if next_field == "appointment_ref":
+        candidates = await _list_candidate_appointments(
+            name=entities.get("name"),
+            date_iso=entities.get("date"),
+            repo=repo,
+            appt_repo=appt_repo,
+        )
+        options = []
+        for a in candidates:
+            client = await repo.get(a.client_id)
+            client_name = client.name if client else "?"
+            label = f"{client_name} — {a.starts_at.strftime('%d.%m %H:%M')}"
+            options.append(
+                ClarifyOption(
+                    label=label,
+                    value={
+                        "appointment_id": a.id,
+                        "name": client_name,
+                        "date": a.starts_at.date().isoformat(),
+                        "time": a.starts_at.strftime("%H:%M"),
+                    },
+                )
+            )
+        return ClarifyQuestion(
+            field="appointment_ref",
+            prompt="К какой записи?",
+            editor="appointment_picker",
+            options=options,
+        )
+
+    if next_field == "note_text":
+        return ClarifyQuestion(
+            field="note_text",
+            prompt="Напиши заметку:",
+            editor="text_input",
+        )
+
+    if next_field == "name":
+        clients = await repo.list_recent(limit=10)
+        options = [
+            ClarifyOption(
+                label=c.name,
+                value={"name": c.name, "client_id": c.id},
+            )
+            for c in clients
+        ]
+        return ClarifyQuestion(
+            field="client",
+            prompt="Какой клиент?",
+            editor="client_picker",
+            options=options,
+        )
+
+    if next_field == "client_id":
+        clients = await repo.list_recent(limit=20)
+        options = [
+            ClarifyOption(
+                label=c.name,
+                value={"name": c.name, "client_id": c.id},
+            )
+            for c in clients
+        ]
+        return ClarifyQuestion(
+            field="client",
+            prompt="Какого клиента?",
+            editor="client_picker",
+            options=options,
+        )
+
+    if next_field == "date":
+        return ClarifyQuestion(
+            field="date", prompt="На какую дату?", editor="calendar"
+        )
+    if next_field == "time":
+        return ClarifyQuestion(
+            field="time", prompt="Во сколько?", editor="time_picker"
+        )
+    if next_field == "new_date_or_time":
+        # Pick whichever is missing; both missing → ask for new_time first
+        # (most common shape: «перенеси Иру на 16»).
+        if not entities.get("new_time"):
+            return ClarifyQuestion(
+                field="new_time", prompt="На какое время?", editor="time_picker"
+            )
+        return ClarifyQuestion(
+            field="new_date", prompt="На какую дату?", editor="calendar"
+        )
+
+    # Should not happen — defensive fallback.
+    return ClarifyQuestion(
+        field="note_text",
+        prompt="Уточни команду:",
+        editor="text_input",
+    )
 
