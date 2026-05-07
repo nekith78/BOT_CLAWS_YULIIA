@@ -73,10 +73,26 @@ class EditNoteAction:
             and client_id_hint is None
             and appointment_id_hint is None
         ):
-            clarify = await _clarify_no_client(ctx, args)
-            if clarify is not None:
-                return clarify
-            # No candidates → fall through to the original FAIL paths below.
+            # Only auto-resolve to a single match when we already have note
+            # text. Without note text, we'd produce an empty CONFIRM — the
+            # second-brain path is the only place that can ask for note text
+            # interactively, so we keep CLARIFY here (or bare FAIL when no
+            # candidates) so the user retries explicitly.
+            if note:
+                single_appt = await _try_resolve_single_appointment(ctx, args)
+                if single_appt is not None:
+                    appointment_id_hint = single_appt.id
+                    client_id_hint = single_appt.client_id
+                    args = {
+                        **args,
+                        "appointment_id": single_appt.id,
+                        "client_id": single_appt.client_id,
+                    }
+            if appointment_id_hint is None:
+                clarify = await _clarify_no_client(ctx, args)
+                if clarify is not None:
+                    return clarify
+                # No candidates → fall through to the original FAIL paths below.
 
         if not note and appointment_id_hint is None:
             return ActionResponse(
@@ -183,6 +199,27 @@ class EditNoteAction:
         if updated is None:
             return ActionResponse(result=ActionResult.FAIL, text="Запись не найдена.")
         return ActionResponse(result=ActionResult.EXECUTED, text="✅ Заметка сохранена.")
+
+
+async def _try_resolve_single_appointment(
+    ctx: ActionContext, args: dict[str, Any]
+) -> Any | None:
+    """Return THE only matching appointment (by date hint, or upcoming),
+    or None if zero / 2+ matches. Lets edit_note skip the «1-option list»
+    awkwardness when the user's intent is unambiguous."""
+    appt_repo = AppointmentRepository(ctx.session)
+    date_iso = (args.get("date") or "").strip()
+    if date_iso:
+        try:
+            local_date = _date.fromisoformat(date_iso)
+        except ValueError:
+            return None
+        appts = await appt_repo.list_for_date(local_date, tz=ctx.tz)
+    else:
+        appts = await appt_repo.list_upcoming(now=ctx.now_utc, limit=10)
+    if len(appts) == 1:
+        return appts[0]
+    return None
 
 
 async def _clarify_no_client(

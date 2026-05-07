@@ -178,9 +178,9 @@ class CancelAppointmentAction:
 async def _clarify_no_client(
     ctx: ActionContext, args: dict[str, Any]
 ) -> ActionResponse | None:
-    """Plan #6 Layer A helper. Build a CLARIFY response listing candidate
-    appointments when the user said «отмени запись» (and maybe a date) but
-    no client. Returns None if there are no candidates — caller emits FAIL."""
+    """Plan #6 Layer A helper. CONFIRM directly when there's exactly one
+    matching appointment (no point asking the user to pick from a list of
+    one); CLARIFY when 2+; None when zero — caller emits FAIL."""
     appt_repo = AppointmentRepository(ctx.session)
     date_iso = (args.get("date") or "").strip()
     if date_iso:
@@ -195,9 +195,26 @@ async def _clarify_no_client(
     if not appts:
         return None
 
-    # Resolve client names for label rendering. Single fetch loop — client
-    # lists are small in this bot.
     client_repo = ClientRepository(ctx.session)
+
+    # Single match → straight to CONFIRM. No list, no extra tap.
+    if len(appts) == 1:
+        a = appts[0]
+        client = await client_repo.get(a.client_id)
+        if client is None:
+            return None
+        text = (
+            "Отменить запись:\n"
+            f"<b>{html.escape(client.name)}</b>\n"
+            f"📅 {format_local_dt(a.starts_at, ctx.tz)}"
+        )
+        return ActionResponse(
+            result=ActionResult.CONFIRM,
+            text=text,
+            pending_payload={"appointment_id": a.id},
+        )
+
+    # 2+ matches → list with appointment_id payloads.
     options: list[ClarifyOption] = []
     for a in appts:
         client = await client_repo.get(a.client_id)

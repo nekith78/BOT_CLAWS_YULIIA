@@ -84,15 +84,28 @@ class MoveAppointmentAction:
 
         # Plan #6 Layer A — when the user said «перенеси на 16:00» (or similar)
         # without a client_name, list upcoming appointments so they can pick
-        # the source one. After the pick the action replans with appointment_id.
+        # the source one. If there's only one upcoming, skip the list and
+        # auto-resolve to that appointment.
         if (
             not name
             and client_id_hint is None
             and appointment_id_hint is None
         ):
-            clarify = await _clarify_no_client(ctx)
-            if clarify is not None:
-                return clarify
+            appt_repo = AppointmentRepository(ctx.session)
+            upcoming = await appt_repo.list_upcoming(now=ctx.now_utc, limit=10)
+            if len(upcoming) == 1:
+                only = upcoming[0]
+                appointment_id_hint = only.id
+                client_id_hint = only.client_id
+                args = {
+                    **args,
+                    "appointment_id": only.id,
+                    "client_id": only.client_id,
+                }
+            else:
+                clarify = await _clarify_no_client(ctx)
+                if clarify is not None:
+                    return clarify
 
         # 1. Resolve client.
         if client_id_hint is None:

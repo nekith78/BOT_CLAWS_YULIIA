@@ -112,12 +112,38 @@ class DeleteClientAction:
 
 
 async def _clarify_no_name(ctx: ActionContext) -> ActionResponse | None:
-    """Plan #6 Layer A helper. List recent clients (up to 20) so the user
-    can pick which one to delete when no name was given."""
+    """Plan #6 Layer A helper. CONFIRM directly when there's exactly one
+    client in the DB; CLARIFY when 2+; None when zero."""
     repo = ClientRepository(ctx.session)
     clients = await repo.list_recent(limit=20)
     if not clients:
         return None
+
+    # Single client in the whole base → no point listing one option.
+    if len(clients) == 1:
+        c = clients[0]
+        appts = await AppointmentRepository(ctx.session).list_for_client(
+            c.id, statuses=("scheduled", "done")
+        )
+        n_appts = len(appts)
+        appts_line = (
+            f"\n⚠️ У клиента {n_appts} активных/прошлых записей — они тоже удалятся."
+            if n_appts > 0
+            else ""
+        )
+        text = (
+            "🗑 <b>Удалить клиента?</b>\n"
+            f"<b>{html.escape(c.name)}</b>"
+            + (f" (@{html.escape(c.instagram)})" if c.instagram else "")
+            + appts_line
+            + "\n\nЭто нельзя отменить."
+        )
+        return ActionResponse(
+            result=ActionResult.CONFIRM,
+            text=text,
+            pending_payload={"client_id": c.id},
+        )
+
     options = [
         ClarifyOption(
             label=client_label(c.name, c.instagram, idx),

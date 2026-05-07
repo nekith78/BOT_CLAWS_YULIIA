@@ -511,7 +511,7 @@ async def _dispatch(
                 transcript, now_local.date(), client_repo, appt_repo
             )
             sb_result = await sb_decide_next(
-                entities, now_local.date(), client_repo, appt_repo
+                entities, now_local.date(), client_repo, appt_repo, tz=tz,
             )
 
             if sb_result.kind == "no_verb_detected":
@@ -761,7 +761,7 @@ async def _resume_from_sb(
         appt_repo = AppointmentRepository(session)
 
         sb_result = await sb_decide_next(
-            entities, now_local.date(), client_repo, appt_repo
+            entities, now_local.date(), client_repo, appt_repo, tz=tz,
         )
 
         if sb_result.kind == "no_verb_detected":

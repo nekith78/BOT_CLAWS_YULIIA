@@ -21,8 +21,8 @@ import re
 from dataclasses import dataclass
 from datetime import date as _date
 from datetime import datetime, timezone
-from datetime import time as _time
 from typing import TYPE_CHECKING, Any, Literal
+from zoneinfo import ZoneInfo
 
 from src.bot.parsers import parse_time_from_text
 from src.bot.relative_date import parse_relative_date
@@ -635,13 +635,23 @@ async def decide_next(
     today_local: _date,
     repo: ClientRepository,
     appt_repo: AppointmentRepository,
+    *,
+    tz: ZoneInfo | None = None,
 ) -> NormalizationResult:
     """Compute the next step: build canonical, ask a clarifying question,
     or report no-verb. Stateless — the bot persists `entities` between
-    calls and merges the user's answer in before calling again."""
+    calls and merges the user's answer in before calling again.
+
+    `tz` is the bot's local timezone. Required for any verb that touches
+    existing appointments — without it, candidate filtering and date/time
+    rendering happen in UTC and silently break the lookup downstream.
+    Defaults to UTC to keep legacy callers working in tests.
+    """
     verb = entities.get("verb")
     if not verb:
         return NormalizationResult(kind="no_verb_detected")
+
+    effective_tz = tz or ZoneInfo("UTC")
 
     # Try to resolve appointment_ref against the DB before asking.
     if (
@@ -649,7 +659,7 @@ async def decide_next(
         and not entities.get("appointment_id")
     ):
         await _try_resolve_appointment_ref(
-            entities, today_local, repo, appt_repo
+            entities, today_local, repo, appt_repo, tz=effective_tz
         )
 
     missing = compute_missing(verb, entities)
@@ -661,7 +671,9 @@ async def decide_next(
 
     # Ask for the FIRST missing entity (ordered by `_VERB_REQUIRES`).
     next_field = missing[0]
-    question = await _build_question(next_field, entities, repo, appt_repo)
+    question = await _build_question(
+        next_field, entities, repo, appt_repo, tz=effective_tz
+    )
     return NormalizationResult(
         kind="needs_clarification",
         question=question,
@@ -676,21 +688,22 @@ async def _try_resolve_appointment_ref(
     today_local: _date,
     repo: ClientRepository,
     appt_repo: AppointmentRepository,
+    *,
+    tz: ZoneInfo,
 ) -> None:
     """If exactly one DB appointment matches the (name, date) hints, fill
-    appointment_id + name/date/time so the canonical builder has them."""
+    appointment_id + name + LOCAL date/time so the canonical builder has
+    them. Date/time MUST be local — the action layer interprets them as
+    local when looking the appointment up via parse_local_to_utc."""
     name = entities.get("name")
     date_iso = entities.get("date")
     candidates = await _list_candidate_appointments(
-        name=name, date_iso=date_iso, repo=repo, appt_repo=appt_repo
+        name=name, date_iso=date_iso, repo=repo, appt_repo=appt_repo, tz=tz
     )
     if len(candidates) == 1:
         a = candidates[0]
         client = await repo.get(a.client_id)
-        local = a.starts_at.replace(tzinfo=timezone.utc)
-        # We don't know `tz` here — appt_repo stores naive UTC. Keep it
-        # simple: serialize as UTC date+time. Bot layer can render local
-        # for display; LLM #2 only needs unique reference.
+        local = a.starts_at.replace(tzinfo=timezone.utc).astimezone(tz)
         entities["appointment_id"] = a.id
         if client and not entities.get("name"):
             entities["name"] = client.name
@@ -704,27 +717,19 @@ async def _list_candidate_appointments(
     date_iso: str | None,
     repo: ClientRepository,
     appt_repo: AppointmentRepository,
+    tz: ZoneInfo,
 ) -> list[Any]:
-    """Pick candidate appointments based on the entity hints we have."""
-    # If a date is given, list that day's appointments and filter by name
-    # afterward (DB list_for_date returns naive UTC — caller pretends UTC
-    # is local, which is fine for the candidate-set heuristic).
+    """Pick candidate appointments based on the entity hints we have.
+
+    Uses `appt_repo.list_for_date(date, tz=tz)` so the day window is the
+    user's LOCAL day, not the UTC day — otherwise an appointment late in
+    the day in the user's timezone gets picked up under the wrong date."""
     if date_iso:
         try:
             d = _date.fromisoformat(date_iso)
         except ValueError:
             return []
-        # Use a UTC-naive zone to avoid a tz dependency at this layer.
-        # The bot caller invokes decide_next with today_local in its own tz;
-        # for selection we use the local-day window relative to that tz on
-        # the UI layer, but for candidate-counting any conservative window
-        # works. Read upcoming and filter by date to keep this stateless.
-        all_upcoming = await appt_repo.list_upcoming(
-            now=datetime.combine(d, _time(0, 0)), limit=200
-        )
-        on_date = [
-            a for a in all_upcoming if a.starts_at.date() == d
-        ]
+        on_date = await appt_repo.list_for_date(d, tz=tz)
         if name:
             client = await repo.find_by_name_ci(name)
             if client:
@@ -747,28 +752,36 @@ async def _build_question(
     entities: dict[str, Any],
     repo: ClientRepository,
     appt_repo: AppointmentRepository,
+    *,
+    tz: ZoneInfo,
 ) -> ClarifyQuestion:
-    """Translate a missing-field marker into a concrete user question."""
+    """Translate a missing-field marker into a concrete user question.
+
+    Date/time values for picker labels and option values are rendered in
+    LOCAL time — both for the user (so they recognise their own slot) and
+    for the canonical builder (so LLM #2's lookup hits the right row)."""
     if next_field == "appointment_ref":
         candidates = await _list_candidate_appointments(
             name=entities.get("name"),
             date_iso=entities.get("date"),
             repo=repo,
             appt_repo=appt_repo,
+            tz=tz,
         )
         options = []
         for a in candidates:
             client = await repo.get(a.client_id)
             client_name = client.name if client else "?"
-            label = f"{client_name} — {a.starts_at.strftime('%d.%m %H:%M')}"
+            local = a.starts_at.replace(tzinfo=timezone.utc).astimezone(tz)
+            label = f"{client_name} — {local.strftime('%d.%m %H:%M')}"
             options.append(
                 ClarifyOption(
                     label=label,
                     value={
                         "appointment_id": a.id,
                         "name": client_name,
-                        "date": a.starts_at.date().isoformat(),
-                        "time": a.starts_at.strftime("%H:%M"),
+                        "date": local.date().isoformat(),
+                        "time": local.strftime("%H:%M"),
                     },
                 )
             )
