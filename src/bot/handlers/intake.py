@@ -49,6 +49,7 @@ from src.bot.keyboards.time_part_picker import (
     time_minute_picker_kb,
 )
 from src.bot.keyboards.time_picker import time_picker_kb
+from src.bot.skip_phrases import is_skip_phrase
 from src.bot.states import IntakePending
 from src.bot.ui import cancel as ui_cancel
 from src.services import settings_service
@@ -1227,8 +1228,13 @@ async def _commit_text_field_edit(
         args_so_far["client_id"] = payload["client_id"]
     if "appointment_id" in payload:
         args_so_far["appointment_id"] = payload["appointment_id"]
-    args_so_far[field_key] = value
-    log.info("intake edit (text): field=%s value=%r", field_key, value)
+    # For optional text fields («note», «instagram») — recognise «пусто/нет/
+    # ничего/пропусти» as «leave empty», not as the literal string.
+    if field_key in {"note", "instagram"} and is_skip_phrase(value):
+        args_so_far[field_key] = ""
+    else:
+        args_so_far[field_key] = value
+    log.info("intake edit (text): field=%s value=%r", field_key, args_so_far[field_key])
 
     registry = _ensure_registry()
     action_name = fsm.get("intake_action")

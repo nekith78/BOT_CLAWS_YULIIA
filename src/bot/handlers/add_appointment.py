@@ -42,6 +42,7 @@ from src.bot.keyboards.time_part_picker import (
     time_minute_picker_kb,
 )
 from src.bot.keyboards.time_picker import time_picker_kb
+from src.bot.skip_phrases import is_skip_phrase
 from src.bot.states import AddAppointment
 from src.bot.ui import advance, cancel, finalize
 from src.services import settings_service
@@ -271,7 +272,7 @@ async def on_new_client_instagram(
     if message.text is None:
         return
     raw = message.text.strip()
-    instagram: str | None = None if raw in {SkipPipe, "-", ""} else raw.lstrip("@")
+    instagram: str | None = None if is_skip_phrase(raw) else raw.lstrip("@")
     state_data = await state.get_data()
     name = state_data["new_client_name"]
     async with session_scope(factory) as session:
@@ -603,8 +604,8 @@ async def on_entering_note_voice(
         await bot.send_message(message.chat.id, "Не услышал ничего.")
         return
     log.info("addappt note voice → %r", transcript)
-    # Same path on_note_text takes — store + go to confirm.
-    await state.update_data(visit_note=transcript)
+    note_value = None if is_skip_phrase(transcript) else transcript
+    await state.update_data(visit_note=note_value)
     await _show_confirm(
         bot, chat_id=message.chat.id, state=state, factory=data["session_factory"]
     )
@@ -648,7 +649,9 @@ async def on_note_skipped(
 async def on_note_text(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
     if message.text is None:
         return
-    await state.update_data(visit_note=message.text.strip())
+    raw = message.text.strip()
+    note_value = None if is_skip_phrase(raw) else raw
+    await state.update_data(visit_note=note_value)
     await _show_confirm(
         bot,
         chat_id=message.chat.id,
