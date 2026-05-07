@@ -92,6 +92,10 @@ class IntakeCD(CallbackData, prefix="intake", sep="|"):
                            ("date", "time", "client_name", "note", ...).
     - action="cancel_edit": user pressed ❌ Отмена inside a text-input
                             edit-flow — return to the confirm-card unchanged.
+    - action="sb_pick":     (Plan #6) user picked an option inside the
+                            second-brain question loop (e.g. which
+                            appointment to operate on). `index` carries
+                            the option index in the FSM-stashed list.
 
     `tag` is a short id for the pending action stashed in FSM data; it
     binds the keyboard click to the right server-side state.
@@ -106,6 +110,7 @@ class IntakeCD(CallbackData, prefix="intake", sep="|"):
         "edit_field",
         "cancel_edit",
         "back_to_confirm",
+        "sb_pick",
     ]
     tag: str = ""
     index: int = 0

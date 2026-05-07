@@ -8,6 +8,7 @@ from src.bot.states import (
     EditAppointment,
     EditClient,
     HistoryFilter,
+    IntakePending,
 )
 
 
@@ -46,3 +47,9 @@ def test_history_filter_states() -> None:
 
 def test_browse_clients_states() -> None:
     assert BrowseClients.searching.state == "BrowseClients:searching"
+
+
+def test_intake_pending_smart_brain_states() -> None:
+    """Plan #6 — second-brain question loop adds two states."""
+    assert IntakePending.smart_brain_pick.state == "IntakePending:smart_brain_pick"
+    assert IntakePending.smart_brain_text.state == "IntakePending:smart_brain_text"

@@ -8,6 +8,7 @@ from src.bot.callback_data import (
     CalendarCD,
     ClientCD,
     DateShortcutCD,
+    IntakeCD,
     PeriodCD,
     TimeCD,
     WizardCD,
@@ -72,3 +73,15 @@ class TestDateShortcutCD:
     def test_round_trip(self, action: str) -> None:
         cd = DateShortcutCD(action=action)  # type: ignore[arg-type]
         assert DateShortcutCD.unpack(cd.pack()) == cd
+
+
+class TestIntakeCD:
+    def test_sb_pick_round_trip(self) -> None:
+        """Plan #6 — sb_pick used by appointment-picker / client-picker
+        questions inside the second-brain question loop. `index` carries
+        which option the user tapped; `tag` binds to FSM state."""
+        cd = IntakeCD(action="sb_pick", tag="abc12345", index=2)
+        unpacked = IntakeCD.unpack(cd.pack())
+        assert unpacked.action == "sb_pick"
+        assert unpacked.tag == "abc12345"
+        assert unpacked.index == 2

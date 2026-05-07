@@ -57,6 +57,11 @@ class IntakePending(StatesGroup):
     editing_field_text: user tapped «✏️ Изменить <note|instagram>» on
         the confirm-card; the bot is waiting for the next message
         (text or voice) to use as the new field value.
+    smart_brain_pick: LLM #1 returned no tool, second brain is asking
+        a button-pick question (which appointment / client / date / time);
+        waiting for the user's tap.
+    smart_brain_text: same path, but the second brain is asking for free
+        text (e.g. a note's body); waiting for the next text/voice message.
     """
 
     confirming = State()
@@ -64,6 +69,8 @@ class IntakePending(StatesGroup):
     choosing_edit_field = State()       # «Изменить» tapped — submenu visible
     editing_field_picker = State()
     editing_field_text = State()
+    smart_brain_pick = State()
+    smart_brain_text = State()
 
 
 class NotifySettings(StatesGroup):
