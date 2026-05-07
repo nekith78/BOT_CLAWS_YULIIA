@@ -35,7 +35,9 @@ async def test_count_clients_zero(session: AsyncSession) -> None:
     ctx = build_ctx(session)
     resp = await CountClientsAction().plan(ctx, {})
     assert resp.result is ActionResult.EXECUTED
-    assert "0" in resp.text
+    assert "пока нет" in resp.text.lower()
+    # No keyboard when there are no clients.
+    assert resp.keyboard is None
 
 
 async def test_count_clients_three(session: AsyncSession) -> None:
@@ -47,6 +49,9 @@ async def test_count_clients_three(session: AsyncSession) -> None:
     assert "3" in resp.text
     # Russian declension — 3 → «клиента».
     assert "клиента" in resp.text
+    # Tappable client list rendered (one row per client + footer row).
+    assert resp.keyboard is not None
+    assert len(resp.keyboard.inline_keyboard) >= 3
 
 
 # --- count_appointments ---------------------------------------------------
