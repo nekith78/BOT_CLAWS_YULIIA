@@ -153,10 +153,6 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
         )
         return
 
-    # Cancel any active wizard before showing the status — keeps message order
-    # natural (cancel ack first, then "обрабатываю").
-    await _cancel_active_state(bot=bot, state=state, chat_id=chat_id)
-
     status_msg_id = await _send_status(bot, chat_id, "⏳ Распознаю голос…")
 
     # Download voice as bytes.
@@ -176,6 +172,19 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
         return
 
     log.info("intake voice → transcript: %r", transcript)
+
+    # If we're in a wizard step that knows how to consume free text/voice,
+    # run that consumer first. The status message is replaced or deleted
+    # by the consumer; we don't fall through to LLM intake on success.
+    if await _try_wizard_consume(
+        state=state, text=transcript, chat_id=chat_id, bot=bot,
+        data=data, status_msg_id=status_msg_id,
+    ):
+        return
+
+    # Not handled by any wizard → cancel any other active state and run
+    # the LLM intake on the transcript.
+    await _cancel_active_state(bot=bot, state=state, chat_id=chat_id)
     await _edit_status(bot, chat_id, status_msg_id, "⏳ Обрабатываю команду…")
     await _dispatch(
         message=message,
@@ -203,6 +212,18 @@ async def on_text(message: Message, state: FSMContext, bot: Bot, **data: Any) ->
     if not text:
         return
     chat_id = message.chat.id
+
+    # Wizard-aware first: if the user is mid-step in a flow that consumes
+    # free text (AddAppointment.choosing_time / entering_note), let that
+    # flow handle the message instead of cancelling state and routing to
+    # the LLM. status_msg_id=None tells the consumer to send fresh
+    # messages instead of editing a status placeholder.
+    if await _try_wizard_consume(
+        state=state, text=text, chat_id=chat_id, bot=bot, data=data,
+        status_msg_id=None,
+    ):
+        return
+
     await _cancel_active_state(bot=bot, state=state, chat_id=chat_id)
     status_msg_id = await _send_status(bot, chat_id, "⏳ Обрабатываю команду…")
     await _dispatch(
@@ -266,6 +287,149 @@ async def _cancel_active_state(*, bot: Bot, state: FSMContext, chat_id: int) -> 
     cur_state = await state.get_state()
     if cur_state is not None:
         await ui_cancel(bot, chat_id=chat_id, state=state)
+
+
+# ---------- wizard-aware text/voice consumption -----------------------------
+#
+# Goal: when the user is mid-wizard at a known input step (e.g.
+# AddAppointment.choosing_time asking «Во сколько?»), interpret free
+# text/voice contextually before falling through to the LLM intake.
+#
+# Returns True if the message was consumed by a wizard step (the caller
+# must NOT cancel state nor dispatch to the LLM). Returns False to let
+# the normal LLM intake path proceed.
+
+
+async def _try_wizard_consume(
+    *,
+    state: FSMContext,
+    text: str,
+    chat_id: int,
+    bot: Bot,
+    data: dict[str, Any],
+    status_msg_id: int | None,
+) -> bool:
+    from src.bot.states import AddAppointment  # avoid circular import at module load
+
+    cur = await state.get_state()
+    if cur == AddAppointment.choosing_time.state:
+        return await _consume_at_choosing_time(
+            state=state, text=text, chat_id=chat_id, bot=bot,
+            data=data, status_msg_id=status_msg_id,
+        )
+    if cur == AddAppointment.entering_note.state:
+        return await _consume_at_entering_note(
+            state=state, text=text, chat_id=chat_id, bot=bot,
+            data=data, status_msg_id=status_msg_id,
+        )
+    return False
+
+
+async def _consume_at_choosing_time(
+    *,
+    state: FSMContext,
+    text: str,
+    chat_id: int,
+    bot: Bot,
+    data: dict[str, Any],
+    status_msg_id: int | None,
+) -> bool:
+    """In AddAppointment.choosing_time, the user might type either:
+    - HH:MM → save time and advance to note step
+    - relative date («завтра», «в среду», «8.05») → silently update
+      `picked_date` and re-prompt the time picker
+    - anything else → hint and stay
+    """
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+    from datetime import time as _time
+    from datetime import timezone as _timezone
+
+    from src.bot.handlers.add_appointment import _save_time_and_advance
+    from src.bot.keyboards.time_picker import time_picker_kb
+    from src.bot.parsers import parse_time_from_text
+    from src.bot.relative_date import parse_relative_date
+    from src.bot.ui import advance
+    from src.services import settings_service
+    from src.services.formatters import format_date_ru
+    from src.storage.db import session_scope as _session_scope
+
+    parsed_time = parse_time_from_text(text)
+    if parsed_time is not None:
+        if status_msg_id is not None:
+            await _delete_status(bot, chat_id, status_msg_id)
+        await _save_time_and_advance(
+            bot, chat_id=chat_id, state=state, hhmm=parsed_time
+        )
+        return True
+
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with _session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+    today_local = _datetime.now(tz=tz).date()
+    new_date_iso = parse_relative_date(text, today_local)
+    if new_date_iso is not None:
+        target = _date.fromisoformat(new_date_iso)
+        await state.update_data(picked_date=new_date_iso)
+        if status_msg_id is not None:
+            await _delete_status(bot, chat_id, status_msg_id)
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text=(
+                f"📅 Дата обновлена на "
+                f"{format_date_ru(_datetime.combine(target, _time(0)))}.\n"
+                f"Во сколько?"
+            ),
+            reply_markup=time_picker_kb(),
+        )
+        return True
+
+    # Neither time nor date — keep the user in the wizard with a hint.
+    if status_msg_id is not None:
+        await _replace_status(
+            bot, chat_id, status_msg_id,
+            "Не понял. Введи время <code>HH:MM</code> или нажми кнопку.",
+        )
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Не понял. Введи время <code>HH:MM</code> или нажми кнопку.",
+        )
+    # Suppress unused import (keeps mypy quiet about timezone).
+    _ = _timezone
+    return True
+
+
+async def _consume_at_entering_note(
+    *,
+    state: FSMContext,
+    text: str,
+    chat_id: int,
+    bot: Bot,
+    data: dict[str, Any],
+    status_msg_id: int | None,
+) -> bool:
+    """In AddAppointment.entering_note, free text/voice IS the note
+    (with skip-phrase detection)."""
+    from src.bot.handlers.add_appointment import _show_confirm
+
+    note_value = None if is_skip_phrase(text) else text
+    await state.update_data(visit_note=note_value)
+    if status_msg_id is not None:
+        await _delete_status(bot, chat_id, status_msg_id)
+    await _show_confirm(
+        bot, chat_id=chat_id, state=state, factory=data["session_factory"]
+    )
+    return True
+
+
+async def _delete_status(bot: Bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except TelegramBadRequest as exc:
+        log.debug("intake: delete_status failed: %s", exc)
 
 
 # ---------- common dispatch --------------------------------------------------

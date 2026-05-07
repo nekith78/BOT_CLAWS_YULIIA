@@ -8,7 +8,6 @@ import pytest
 
 from src.bot.relative_date import parse_relative_date
 
-
 # Anchor: Thursday 2026-05-07.
 TODAY = date(2026, 5, 7)
 

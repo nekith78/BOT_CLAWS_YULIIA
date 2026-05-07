@@ -42,7 +42,6 @@ from src.bot.keyboards.time_part_picker import (
     time_minute_picker_kb,
 )
 from src.bot.keyboards.time_picker import time_picker_kb
-from src.bot.relative_date import parse_relative_date
 from src.bot.skip_phrases import is_skip_phrase
 from src.bot.states import AddAppointment
 from src.bot.ui import advance, cancel, finalize
@@ -494,161 +493,10 @@ async def _save_time_and_advance(
     await state.set_state(AddAppointment.entering_note)
 
 
-# ---------- voice/text shortcut at the time step ----------------------------
-#
-# So the user can just say or type «16:30» / «время 16 30» mid-wizard
-# without tapping the grid. Handles text + voice (via STT). Falls back
-# silently when no time-shaped substring appears in the text — the user
-# can always reach for the picker buttons.
-
-import re as _re  # noqa: E402 — keep the helper local to this section
-
-_TIME_PATTERN = _re.compile(r"(\d{1,2})\s*[:.\-_/ ]\s*(\d{2})")
-
-
-def _parse_time_from_text(raw: str) -> str | None:
-    """Pull HH:MM out of free text. Whisper usually digit-formats Russian
-    voice numbers («шестнадцать тридцать» → «16:30») so a digit-pattern
-    regex covers most realistic transcripts."""
-    m = _TIME_PATTERN.search(raw)
-    if not m:
-        return None
-    hh = int(m.group(1))
-    mm = int(m.group(2))
-    if 0 <= hh < 24 and 0 <= mm < 60:
-        return f"{hh:02d}:{mm:02d}"
-    return None
-
-
-@router.message(AddAppointment.choosing_time, F.text)
-async def on_choosing_time_text(
-    message: Message, state: FSMContext, bot: Bot, **data: Any
-) -> None:
-    if message.text is None:
-        return
-    await _consume_text_at_time_step(
-        bot, state=state, chat_id=message.chat.id, raw=message.text, data=data
-    )
-
-
-async def _consume_text_at_time_step(
-    bot: Bot,
-    *,
-    state: FSMContext,
-    chat_id: int,
-    raw: str,
-    data: dict[str, Any],
-) -> None:
-    """Handle free text/voice transcript while bot is asking «Во сколько?».
-
-    Order of attempts:
-    1. HH:MM extraction → success → save and advance to note step.
-    2. Russian relative-date phrase («завтра», «в среду», «8.05») →
-       silently update `picked_date` in FSM and re-render the time picker
-       so the user can pick a time for the new date.
-    3. Otherwise: «Не понял».
-    """
-    parsed_time = _parse_time_from_text(raw)
-    if parsed_time is not None:
-        await _save_time_and_advance(
-            bot, chat_id=chat_id, state=state, hhmm=parsed_time
-        )
-        return
-
-    # No time match → maybe the user is correcting the date mid-wizard.
-    factory = cast(async_sessionmaker[Any], data["session_factory"])
-    async with session_scope(factory) as session:
-        tz = await settings_service.get_timezone(session)
-    today_local = datetime.now(tz=tz).date()
-    new_date_iso = parse_relative_date(raw, today_local)
-    if new_date_iso is not None:
-        await state.update_data(picked_date=new_date_iso)
-        await advance(
-            bot,
-            chat_id=chat_id,
-            state=state,
-            text=(
-                f"📅 Дата обновлена на "
-                f"{format_date_ru(datetime.combine(date.fromisoformat(new_date_iso), time(0)))}.\n"
-                f"Во сколько?"
-            ),
-            reply_markup=time_picker_kb(),
-        )
-        return
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text="Не понял. Введи время <code>HH:MM</code> или нажми кнопку.",
-    )
-
-
-@router.message(AddAppointment.choosing_time, F.voice)
-async def on_choosing_time_voice(
-    message: Message, state: FSMContext, bot: Bot, **data: Any
-) -> None:
-    if message.voice is None:
-        return
-    settings = data.get("settings")
-    stt = data.get("stt")
-    if stt is None or settings is None:
-        return
-    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
-        await bot.send_message(
-            message.chat.id,
-            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
-        )
-        return
-    file = await bot.get_file(message.voice.file_id)
-    if file.file_path is None:
-        return
-    import io as _io
-
-    buf = _io.BytesIO()
-    await bot.download_file(file.file_path, buf)
-    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
-    log.info("addappt time voice → %r", transcript)
-    if not transcript:
-        await bot.send_message(message.chat.id, "Не услышал ничего.")
-        return
-    await _consume_text_at_time_step(
-        bot, state=state, chat_id=message.chat.id, raw=transcript, data=data
-    )
-
-
-@router.message(AddAppointment.entering_note, F.voice)
-async def on_entering_note_voice(
-    message: Message, state: FSMContext, bot: Bot, **data: Any
-) -> None:
-    """Voice during the note step — transcribe and use as the note text."""
-    if message.voice is None:
-        return
-    settings = data.get("settings")
-    stt = data.get("stt")
-    if stt is None or settings is None:
-        return
-    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
-        await bot.send_message(
-            message.chat.id,
-            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
-        )
-        return
-    file = await bot.get_file(message.voice.file_id)
-    if file.file_path is None:
-        return
-    import io as _io
-
-    buf = _io.BytesIO()
-    await bot.download_file(file.file_path, buf)
-    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
-    if not transcript:
-        await bot.send_message(message.chat.id, "Не услышал ничего.")
-        return
-    log.info("addappt note voice → %r", transcript)
-    note_value = None if is_skip_phrase(transcript) else transcript
-    await state.update_data(visit_note=note_value)
-    await _show_confirm(
-        bot, chat_id=message.chat.id, state=state, factory=data["session_factory"]
-    )
+# Free-text and voice consumption mid-wizard (choosing_time and
+# entering_note) is centralised in `bot/handlers/intake.py` so the
+# routing logic lives in one place. This module keeps only the
+# inline-button (TimeCD / TimePartCD / WizardCD) handlers.
 
 
 def _skip_kb() -> Any:
