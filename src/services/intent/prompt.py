@@ -26,6 +26,7 @@ def build_system_prompt(
     now_local: datetime,
     tz: str,
     recent_turns: list[dict[str, Any]] | None = None,
+    is_canonical: bool = False,
 ) -> str:
     weekday = _WEEKDAYS_RU[now_local.weekday()]
     today_iso = now_local.date().isoformat()
@@ -96,8 +97,18 @@ def build_system_prompt(
 • «привет», «спасибо», «как дела» → НЕ вызывай никакую tool
 """
     if recent_turns:
-        return base + _render_recent(recent_turns)
+        base = base + _render_recent(recent_turns)
+    if is_canonical:
+        base = base + _CANONICAL_HINT
     return base
+
+
+_CANONICAL_HINT = """
+Текст в этом сообщении уже нормализован: даты в формате YYYY-MM-DD,
+время в формате HH:MM, имена в именительном падеже. Доверяй этим
+значениям и вызывай соответствующий tool без дополнительных
+интерпретаций.
+"""
 
 
 def _render_recent(turns: list[dict[str, Any]]) -> str:

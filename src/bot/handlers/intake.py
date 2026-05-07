@@ -40,6 +40,7 @@ from src.bot.callback_data import (
     TimeCD,
     TimePartCD,
 )
+from src.bot.keyboards.appointment_picker import appointment_picker_kb
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.client_picker import client_picker_kb
 from src.bot.keyboards.confirm_card import confirm_card_kb
@@ -56,6 +57,15 @@ from src.services import settings_service
 from src.services.intent import build_system_prompt
 from src.services.intent.actions import register_default_actions
 from src.services.intent.registry import default_registry
+from src.services.intent.text_normalizer import (
+    ClarifyQuestion,
+)
+from src.services.intent.text_normalizer import (
+    decide_next as sb_decide_next,
+)
+from src.services.intent.text_normalizer import (
+    extract as sb_extract,
+)
 from src.services.intent.types import (
     Action,
     ActionContext,
@@ -65,6 +75,7 @@ from src.services.intent.types import (
 )
 from src.services.voice.stt import STTProvider
 from src.storage.db import session_scope
+from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
 
 log = logging.getLogger(__name__)
@@ -134,6 +145,7 @@ def _ensure_registry() -> Any:
 @router.message(
     F.voice,
     ~StateFilter(IntakePending.editing_field_text),
+    ~StateFilter(IntakePending.smart_brain_text),
 )
 async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
     if message.voice is None or message.from_user is None:
@@ -204,6 +216,7 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
     & ~F.text.startswith("/")
     & ~F.text.in_(_RESERVED_TEXT_BUTTONS),
     ~StateFilter(IntakePending.editing_field_text),
+    ~StateFilter(IntakePending.smart_brain_text),
 )
 async def on_text(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
     if message.text is None:
@@ -444,6 +457,16 @@ async def _dispatch(
     data: dict[str, Any],
     status_msg_id: int,
 ) -> None:
+    """Voice/text dispatch with three-stage cap (per spec):
+        1. LLM #1 on raw transcript.
+        2. If LLM #1 returns no tool, run the second-brain normalizer →
+           either ask the user a clarifying question OR build a canonical
+           sentence and run LLM #2 on it.
+        3. If LLM #2 also returns no tool — show «не понял».
+
+    Smart-brain re-entry into the LLM is gated by the `is_canonical` flag
+    so we never recurse into the normalizer from LLM #2's path.
+    """
     chat_id = message.chat.id
 
     factory = cast(async_sessionmaker[Any], data["session_factory"])
@@ -459,12 +482,15 @@ async def _dispatch(
         tz = await settings_service.get_timezone(session)
         now_local = datetime.now(tz=tz)
         now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None)
+        client_repo = ClientRepository(session)
+        appt_repo = AppointmentRepository(session)
+
+        # --- LLM #1 -----------------------------------------------------
         prompt = build_system_prompt(
             now_local=now_local,
             tz=settings.owner_tz,
             recent_turns=_get_recent_turns(chat_id),
         )
-
         try:
             parsed = await llm.parse_intent(
                 text=transcript,
@@ -473,15 +499,74 @@ async def _dispatch(
                 now_local=now_local,
             )
         except Exception as exc:
-            log.exception("intake: LLM parse failed")
+            log.exception("intake: LLM #1 parse failed")
             err_text = _llm_error_text(exc)
             await _replace_status(bot, chat_id, status_msg_id, err_text)
             return
 
+        # --- LLM #1 didn't pick a tool → try the second brain ----------
         if parsed.tool_name is None:
-            await _replace_status(bot, chat_id, status_msg_id, _help_text())
-            return
+            log.info("intake: LLM #1 missed; engaging second brain")
+            entities = await sb_extract(
+                transcript, now_local.date(), client_repo, appt_repo
+            )
+            sb_result = await sb_decide_next(
+                entities, now_local.date(), client_repo, appt_repo
+            )
 
+            if sb_result.kind == "no_verb_detected":
+                await _replace_status(bot, chat_id, status_msg_id, _help_text())
+                return
+
+            if sb_result.kind == "needs_clarification":
+                assert sb_result.question is not None
+                await _save_sb_state(
+                    state=state,
+                    entities=entities,
+                    question=sb_result.question,
+                    msg_id=status_msg_id,
+                )
+                await _render_sb_question(
+                    bot=bot,
+                    chat_id=chat_id,
+                    msg_id=status_msg_id,
+                    question=sb_result.question,
+                    tag=str((await state.get_data()).get("sb_tag", "")),
+                )
+                return
+
+            # canonical_ready — call LLM #2 on the cleaned sentence.
+            assert sb_result.canonical_text is not None
+            log.info("intake: second-brain canonical: %r", sb_result.canonical_text)
+            prompt_canon = build_system_prompt(
+                now_local=now_local,
+                tz=settings.owner_tz,
+                recent_turns=_get_recent_turns(chat_id),
+                is_canonical=True,
+            )
+            try:
+                parsed = await llm.parse_intent(
+                    text=sb_result.canonical_text,
+                    tools=tools,
+                    system=prompt_canon,
+                    now_local=now_local,
+                )
+            except Exception as exc:
+                log.exception("intake: LLM #2 (canonical) failed")
+                err_text = _llm_error_text(exc)
+                await _replace_status(bot, chat_id, status_msg_id, err_text)
+                return
+
+            if parsed.tool_name is None:
+                # Hard cap — no third retry. Show «не понял».
+                log.warning(
+                    "intake: LLM #2 also missed on canonical %r",
+                    sb_result.canonical_text,
+                )
+                await _replace_status(bot, chat_id, status_msg_id, _help_text())
+                return
+
+        # --- common tail: action.plan + render -------------------------
         action = registry.get(parsed.tool_name)
         if action is None:
             log.warning("intake: LLM picked unknown tool %s", parsed.tool_name)
@@ -523,6 +608,117 @@ async def _dispatch(
         response=response,
         status_msg_id=status_msg_id,
     )
+
+
+# --- smart-brain question rendering + FSM stash ----------------------------
+
+
+async def _save_sb_state(
+    *,
+    state: FSMContext,
+    entities: dict[str, Any],
+    question: ClarifyQuestion,
+    msg_id: int,
+) -> None:
+    """Persist accumulated entities + the active question's metadata so the
+    answer handler can resume the loop. Picker options are stashed as
+    plain dicts (FSM serialises through Redis as JSON)."""
+    tag = uuid.uuid4().hex[:8]
+    options_dump: list[dict[str, Any]] | None = None
+    if question.options is not None:
+        options_dump = [opt.value for opt in question.options]
+    await state.update_data(
+        sb_tag=tag,
+        sb_verb=entities.get("verb"),
+        sb_entities=dict(entities),
+        sb_msg_id=msg_id,
+        sb_field_being_asked=question.field,
+        sb_question_options=options_dump,
+    )
+    if question.editor == "text_input":
+        await state.set_state(IntakePending.smart_brain_text)
+    else:
+        await state.set_state(IntakePending.smart_brain_pick)
+
+
+async def _render_sb_question(
+    *,
+    bot: Bot,
+    chat_id: int,
+    msg_id: int,
+    question: ClarifyQuestion,
+    tag: str,
+) -> None:
+    """Edit the status message into the right widget for `question`."""
+    if question.editor == "appointment_picker":
+        from src.services.intent.text_normalizer import ClarifyOption
+
+        kb_options: list[ClarifyOption] = list(question.options or [])
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt,
+            reply_markup=appointment_picker_kb(options=kb_options, tag=tag),
+        )
+        return
+    if question.editor == "client_picker":
+        # client_picker_kb expects DB rows; we don't have those here. Build
+        # a custom inline keyboard from the option list, with sb_pick callbacks.
+        client_opts = list(question.options or [])
+        rows: list[list[InlineKeyboardButton]] = []
+        for idx, opt in enumerate(client_opts):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=opt.label,
+                        callback_data=IntakeCD(
+                            action="sb_pick", tag=tag, index=idx
+                        ).pack(),
+                    )
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=IntakeCD(action="cancel_edit", tag=tag).pack(),
+                )
+            ]
+        )
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        return
+    if question.editor == "calendar":
+        anchor = datetime.now(timezone.utc).date()
+        cancel_cd = IntakeCD(action="cancel_edit", tag=tag).pack()
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt,
+            reply_markup=calendar_kb(anchor=anchor, back_callback_data=cancel_cd),
+        )
+        return
+    if question.editor == "time_picker":
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt,
+            reply_markup=time_picker_kb(),
+        )
+        return
+    if question.editor == "text_input":
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена",
+                        callback_data=IntakeCD(
+                            action="cancel_edit", tag=tag
+                        ).pack(),
+                    )
+                ]
+            ]
+        )
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt, reply_markup=cancel_kb,
+        )
+        return
 
 
 async def _render(
