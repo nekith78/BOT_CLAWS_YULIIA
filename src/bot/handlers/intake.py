@@ -721,6 +721,437 @@ async def _render_sb_question(
         return
 
 
+# --- smart-brain answer handlers ------------------------------------------
+
+
+async def _resume_from_sb(
+    *,
+    state: FSMContext,
+    bot: Bot,
+    chat_id: int,
+    data: dict[str, Any],
+) -> None:
+    """Shared follow-up after a user answer was merged into `sb_entities`.
+
+    Re-runs `decide_next` and either: renders the next question, calls
+    LLM #2 + action.plan when canonical is ready, or shows «не понял» as
+    a defensive fallback. Always clears `sb_*` state on terminal outcomes.
+    """
+    fsm = await state.get_data()
+    entities = dict(fsm.get("sb_entities") or {})
+    msg_id = int(fsm.get("sb_msg_id") or 0)
+    if not msg_id:
+        log.warning("smart-brain resume: missing sb_msg_id in FSM data")
+        await state.clear()
+        return
+
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    settings = data["settings"]
+    llm = data["llm"]
+    scheduler = data.get("scheduler")
+    notify_runner = data.get("notify_runner")
+    registry = _ensure_registry()
+    tools = registry.tool_specs()
+
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+        now_local = datetime.now(tz=tz)
+        now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None)
+        client_repo = ClientRepository(session)
+        appt_repo = AppointmentRepository(session)
+
+        sb_result = await sb_decide_next(
+            entities, now_local.date(), client_repo, appt_repo
+        )
+
+        if sb_result.kind == "no_verb_detected":
+            await state.clear()
+            await _replace_status(bot, chat_id, msg_id, _help_text())
+            return
+
+        if sb_result.kind == "needs_clarification":
+            assert sb_result.question is not None
+            await _save_sb_state(
+                state=state,
+                entities=entities,
+                question=sb_result.question,
+                msg_id=msg_id,
+            )
+            new_tag = str((await state.get_data()).get("sb_tag", ""))
+            await _render_sb_question(
+                bot=bot,
+                chat_id=chat_id,
+                msg_id=msg_id,
+                question=sb_result.question,
+                tag=new_tag,
+            )
+            return
+
+        # canonical_ready — call LLM #2 and run the action.
+        assert sb_result.canonical_text is not None
+        log.info("smart-brain resumed canonical: %r", sb_result.canonical_text)
+        prompt_canon = build_system_prompt(
+            now_local=now_local,
+            tz=settings.owner_tz,
+            recent_turns=_get_recent_turns(chat_id),
+            is_canonical=True,
+        )
+        try:
+            parsed = await llm.parse_intent(
+                text=sb_result.canonical_text,
+                tools=tools,
+                system=prompt_canon,
+                now_local=now_local,
+            )
+        except Exception as exc:
+            log.exception("smart-brain LLM #2 failed")
+            err_text = _llm_error_text(exc)
+            await state.clear()
+            await _replace_status(bot, chat_id, msg_id, err_text)
+            return
+
+        if parsed.tool_name is None:
+            log.warning(
+                "smart-brain LLM #2 also missed on canonical %r",
+                sb_result.canonical_text,
+            )
+            await state.clear()
+            await _replace_status(bot, chat_id, msg_id, _help_text())
+            return
+
+        action = registry.get(parsed.tool_name)
+        if action is None:
+            log.warning(
+                "smart-brain: LLM picked unknown tool %s", parsed.tool_name
+            )
+            await state.clear()
+            await _replace_status(bot, chat_id, msg_id, _help_text())
+            return
+
+        ctx = ActionContext(
+            session=session,
+            bot=bot,
+            chat_id=chat_id,
+            state=state,
+            scheduler=scheduler,
+            notify_runner=notify_runner,
+            tz=tz,
+            now_utc=now_utc,
+        )
+        response = await action.plan(ctx, parsed.args)
+
+    _push_turn(
+        chat_id,
+        {
+            "user_text": sb_result.canonical_text,  # synthesised, but useful
+            "tool_name": parsed.tool_name,
+            "args": dict(parsed.args),
+            "snapshot": response.context_snapshot,
+            "timestamp": datetime.now(tz=timezone.utc),
+        },
+    )
+
+    # `_render` itself sets new FSM state (CONFIRM → confirming) — but our
+    # current state is smart_brain_pick/text. Clear before rendering so the
+    # confirm-card lands cleanly.
+    await state.clear()
+    await _render(
+        bot=bot,
+        chat_id=chat_id,
+        state=state,
+        action=action,
+        args=parsed.args,
+        response=response,
+        status_msg_id=msg_id,
+    )
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, IntakeCD.filter(F.action == "sb_pick")
+)
+async def on_smart_brain_pick(
+    callback: CallbackQuery,
+    callback_data: IntakeCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    fsm = await state.get_data()
+    if fsm.get("sb_tag") != callback_data.tag:
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+    options = fsm.get("sb_question_options") or []
+    if callback_data.index >= len(options):
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+
+    # Merge picked option's value dict into accumulated entities.
+    entities = dict(fsm.get("sb_entities") or {})
+    entities.update(options[callback_data.index])
+    await state.update_data(sb_entities=entities)
+
+    chat_id = callback.message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or callback.message.message_id)
+    await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await callback.answer()
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, ClientCD.filter(F.action == "pick")
+)
+async def on_smart_brain_client_pick(
+    callback: CallbackQuery,
+    callback_data: ClientCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    """Built-in client_picker_kb sends ClientCD; smart-brain treats it like
+    sb_pick — fetch the chosen client and merge into entities."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        client = await ClientRepository(session).get(callback_data.client_id)
+    if client is None:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+    fsm = await state.get_data()
+    entities = dict(fsm.get("sb_entities") or {})
+    entities["name"] = client.name
+    entities["client_id"] = client.id
+    await state.update_data(sb_entities=entities)
+    chat_id = callback.message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or callback.message.message_id)
+    await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await callback.answer()
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, CalendarCD.filter(F.action == "pick")
+)
+async def on_smart_brain_calendar_pick(
+    callback: CallbackQuery,
+    callback_data: CalendarCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    fsm = await state.get_data()
+    entities = dict(fsm.get("sb_entities") or {})
+    field = fsm.get("sb_field_being_asked") or "date"
+    # field is "date" / "new_date" — both map to the calendar pick.
+    entities[field] = callback_data.iso_date
+    await state.update_data(sb_entities=entities)
+    chat_id = callback.message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or callback.message.message_id)
+    await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await callback.answer()
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, CalendarCD.filter(F.action == "nav")
+)
+async def on_smart_brain_calendar_nav(
+    callback: CallbackQuery,
+    callback_data: CalendarCD,
+    state: FSMContext,
+    bot: Bot,
+    **_: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    anchor = _date.fromisoformat(callback_data.iso_date)
+    delta = -1 if callback_data.nav == "prev" else 32
+    new_anchor = (anchor + _td(days=delta)).replace(day=1)
+    fsm = await state.get_data()
+    cancel_cd = IntakeCD(
+        action="cancel_edit", tag=str(fsm.get("sb_tag") or "")
+    ).pack()
+    await _replace_status(
+        bot, callback.message.chat.id, callback.message.message_id,
+        "Выбери дату:",
+        reply_markup=calendar_kb(anchor=new_anchor, back_callback_data=cancel_cd),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, CalendarCD.filter(F.action == "noop")
+)
+async def on_smart_brain_calendar_noop(
+    callback: CallbackQuery, **_: Any
+) -> None:
+    await callback.answer()
+
+
+@router.callback_query(IntakePending.smart_brain_pick, TimeCD.filter())
+async def on_smart_brain_time_pick(
+    callback: CallbackQuery,
+    callback_data: TimeCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    if callback_data.hhmm == "custom":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+        await callback.answer()
+        return
+    fsm = await state.get_data()
+    entities = dict(fsm.get("sb_entities") or {})
+    field = fsm.get("sb_field_being_asked") or "time"
+    entities[field] = callback_data.hhmm
+    await state.update_data(sb_entities=entities)
+    chat_id = callback.message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or callback.message.message_id)
+    await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await callback.answer()
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.callback_query(IntakePending.smart_brain_pick, TimePartCD.filter())
+async def on_smart_brain_time_part(
+    callback: CallbackQuery,
+    callback_data: TimePartCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    if callback_data.action == "hour":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            f"Минуты для {callback_data.hh:02d}:__",
+            reply_markup=time_minute_picker_kb(hh=callback_data.hh),
+        )
+        await callback.answer()
+        return
+    if callback_data.action == "minute":
+        fsm = await state.get_data()
+        entities = dict(fsm.get("sb_entities") or {})
+        field = fsm.get("sb_field_being_asked") or "time"
+        hhmm = f"{callback_data.hh:02d}:{callback_data.mm:02d}"
+        entities[field] = hhmm
+        await state.update_data(sb_entities=entities)
+        chat_id = callback.message.chat.id
+        msg_id = int(fsm.get("sb_msg_id") or callback.message.message_id)
+        await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+        await callback.answer()
+        await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+        return
+    if callback_data.action == "back_to_hours":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери час:", reply_markup=time_hour_picker_kb(),
+        )
+    elif callback_data.action == "back_to_grid":
+        await _replace_status(
+            bot, callback.message.chat.id, callback.message.message_id,
+            "Выбери время:", reply_markup=time_picker_kb(),
+        )
+    await callback.answer()
+
+
+@router.message(IntakePending.smart_brain_text, F.text)
+async def on_smart_brain_text(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if message.text is None:
+        return
+    text = message.text.strip()
+    if not text:
+        return
+    fsm = await state.get_data()
+    field = fsm.get("sb_field_being_asked") or "note_text"
+    entities = dict(fsm.get("sb_entities") or {})
+    entities[field] = text
+    await state.update_data(sb_entities=entities)
+    chat_id = message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or 0)
+    if msg_id:
+        await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.message(IntakePending.smart_brain_text, F.voice)
+async def on_smart_brain_voice(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if message.voice is None:
+        return
+    settings = data.get("settings")
+    stt: STTProvider | None = data.get("stt")
+    if stt is None or settings is None:
+        return
+    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
+        await bot.send_message(
+            message.chat.id,
+            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
+        )
+        return
+    file = await bot.get_file(message.voice.file_id)
+    if file.file_path is None:
+        return
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, buf)
+    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    if not transcript:
+        await bot.send_message(message.chat.id, "Не услышал ничего, попробуй ещё раз.")
+        return
+    fsm = await state.get_data()
+    field = fsm.get("sb_field_being_asked") or "note_text"
+    entities = dict(fsm.get("sb_entities") or {})
+    entities[field] = transcript
+    await state.update_data(sb_entities=entities)
+    chat_id = message.chat.id
+    msg_id = int(fsm.get("sb_msg_id") or 0)
+    if msg_id:
+        await _edit_status(bot, chat_id, msg_id, "⏳ Обрабатываю…")
+    await _resume_from_sb(state=state, bot=bot, chat_id=chat_id, data=data)
+
+
+@router.callback_query(
+    IntakePending.smart_brain_pick, IntakeCD.filter(F.action == "cancel_edit")
+)
+@router.callback_query(
+    IntakePending.smart_brain_text, IntakeCD.filter(F.action == "cancel_edit")
+)
+async def on_smart_brain_cancel(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    await state.clear()
+    await _replace_status(
+        bot, callback.message.chat.id, callback.message.message_id, "❌ Отменено.",
+    )
+    await callback.answer()
+
+
 async def _render(
     *,
     bot: Bot,
