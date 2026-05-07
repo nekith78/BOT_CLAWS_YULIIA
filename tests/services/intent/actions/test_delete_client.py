@@ -59,6 +59,30 @@ async def test_plan_clarifies_multiple_clients(session: AsyncSession) -> None:
     assert len(resp.clarify_options) == 2
 
 
+async def test_plan_clarifies_when_client_name_empty(session: AsyncSession) -> None:
+    """Plan #6 Layer A — «удали клиента» without a name → list recent
+    clients and let user pick. Up to 20 entries."""
+    repo = ClientRepository(session)
+    for n in ["Ира", "Маша", "Юля", "Аня", "Оля"]:
+        await repo.create(name=n)
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(ctx, {"client_name": ""})
+
+    assert resp.result is ActionResult.CLARIFY
+    assert resp.clarify_options is not None
+    assert len(resp.clarify_options) == 5
+    for opt in resp.clarify_options:
+        assert "client_id" in opt.payload
+
+
+async def test_plan_fails_when_no_clients_exist(session: AsyncSession) -> None:
+    """Empty client_name AND no clients in DB at all → plain FAIL."""
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+    resp = await ACTION.plan(ctx, {"client_name": ""})
+    assert resp.result is ActionResult.FAIL
+
+
 async def test_execute_deletes_client(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))

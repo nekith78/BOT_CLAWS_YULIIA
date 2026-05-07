@@ -13,7 +13,10 @@ from datetime import date, datetime, time, timezone
 from typing import Any, ClassVar
 
 from src.services import settings_service
-from src.services.intent.actions._common import client_label, format_local_dt
+from src.services.intent.actions._common import (
+    client_label,
+    format_local_dt,
+)
 from src.services.intent.resolvers import resolve_appointment, resolve_client
 from src.services.intent.types import (
     ActionContext,
@@ -78,6 +81,18 @@ class MoveAppointmentAction:
                 result=ActionResult.FAIL,
                 text="Не понял, на когда переносим — повтори с датой и/или временем.",
             )
+
+        # Plan #6 Layer A — when the user said «перенеси на 16:00» (or similar)
+        # without a client_name, list upcoming appointments so they can pick
+        # the source one. After the pick the action replans with appointment_id.
+        if (
+            not name
+            and client_id_hint is None
+            and appointment_id_hint is None
+        ):
+            clarify = await _clarify_no_client(ctx)
+            if clarify is not None:
+                return clarify
 
         # 1. Resolve client.
         if client_id_hint is None:
@@ -264,3 +279,30 @@ class MoveAppointmentAction:
 def _parse_hhmm(value: str) -> time:
     hh_s, mm_s = value.split(":")
     return time(int(hh_s), int(mm_s))
+
+
+async def _clarify_no_client(ctx: ActionContext) -> ActionResponse | None:
+    """Plan #6 Layer A helper for move_appointment. List upcoming appointments
+    so the user can pick the source one when client_name is missing."""
+    appt_repo = AppointmentRepository(ctx.session)
+    appts = await appt_repo.list_upcoming(now=ctx.now_utc, limit=10)
+    if not appts:
+        return None
+
+    client_repo = ClientRepository(ctx.session)
+    options: list[ClarifyOption] = []
+    for a in appts:
+        client = await client_repo.get(a.client_id)
+        client_name = client.name if client else "?"
+        label = f"{client_name} — {format_local_dt(a.starts_at, ctx.tz)}"
+        options.append(
+            ClarifyOption(
+                label=label,
+                payload={"appointment_id": a.id, "client_id": a.client_id},
+            )
+        )
+    return ActionResponse(
+        result=ActionResult.CLARIFY,
+        text=f"Ближайшие записи ({len(options)}) — какую переносим?",
+        clarify_options=options,
+    )

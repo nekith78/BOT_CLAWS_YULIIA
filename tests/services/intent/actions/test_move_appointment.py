@@ -183,3 +183,32 @@ async def test_execute_reschedules_appointment(session: AsyncSession) -> None:
     refreshed = await AppointmentRepository(session).get(appt.id)
     assert refreshed is not None
     assert refreshed.starts_at == new_at
+
+
+async def test_plan_clarifies_when_client_name_empty(session: AsyncSession) -> None:
+    """Plan #6 Layer A — «перенеси на 16:00» without client_name → list
+    upcoming appointments and let user pick the source one."""
+    irene = await ClientRepository(session).create(name="Ира")
+    masha = await ClientRepository(session).create(name="Маша")
+    appt_repo = AppointmentRepository(session)
+    await appt_repo.create(
+        client_id=irene.id,
+        starts_at=_local_to_utc(date(2026, 5, 8), 10, 0),
+        duration_min=60,
+    )
+    await appt_repo.create(
+        client_id=masha.id,
+        starts_at=_local_to_utc(date(2026, 5, 9), 14, 0),
+        duration_min=60,
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(
+        ctx, {"client_name": "", "new_time": "16:00"}
+    )
+
+    assert resp.result is ActionResult.CLARIFY
+    assert resp.clarify_options is not None
+    assert len(resp.clarify_options) == 2
+    for opt in resp.clarify_options:
+        assert "appointment_id" in opt.payload

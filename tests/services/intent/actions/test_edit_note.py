@@ -73,6 +73,53 @@ async def test_plan_confirm_declares_note_editable_field(
     assert field.prompt_text and "заметку" in field.prompt_text.lower()
 
 
+async def test_plan_clarifies_when_client_name_empty_and_date_given(
+    session: AsyncSession,
+) -> None:
+    """Plan #6 Layer A — «добавь заметку на 2026-05-08» without client → list
+    appointments on that date and let user pick. note text is allowed to be
+    empty here; the second brain handles missing-text via text-input."""
+    irene = await ClientRepository(session).create(name="Ира")
+    masha = await ClientRepository(session).create(name="Маша")
+    appt_repo = AppointmentRepository(session)
+    await appt_repo.create(
+        client_id=irene.id,
+        starts_at=_local_to_utc(date(2026, 5, 8), 10, 0),
+        duration_min=60,
+    )
+    await appt_repo.create(
+        client_id=masha.id,
+        starts_at=_local_to_utc(date(2026, 5, 8), 14, 0),
+        duration_min=60,
+    )
+
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+    resp = await ACTION.plan(
+        ctx, {"client_name": "", "note": "", "date": "2026-05-08"}
+    )
+
+    assert resp.result is ActionResult.CLARIFY
+    assert resp.clarify_options is not None
+    assert len(resp.clarify_options) == 2
+
+
+async def test_plan_clarifies_when_client_name_empty_and_no_date(
+    session: AsyncSession,
+) -> None:
+    irene = await ClientRepository(session).create(name="Ира")
+    appt_repo = AppointmentRepository(session)
+    await appt_repo.create(
+        client_id=irene.id,
+        starts_at=_local_to_utc(date(2026, 5, 9), 10, 0),
+        duration_min=60,
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+    resp = await ACTION.plan(ctx, {"client_name": "", "note": ""})
+
+    assert resp.result is ActionResult.CLARIFY
+    assert resp.clarify_options is not None
+
+
 async def test_execute_updates_visit_note(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     appt = await AppointmentRepository(session).create(

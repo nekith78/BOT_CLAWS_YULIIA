@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import html
+from datetime import date as _date
 from typing import Any, ClassVar
 
-from src.services.intent.actions._common import client_label, format_local_dt
+from src.services.intent.actions._common import (
+    client_label,
+    format_local_dt,
+    format_local_time,
+)
 from src.services.intent.resolvers import resolve_appointment, resolve_client
 from src.services.intent.types import (
     ActionContext,
@@ -59,7 +64,21 @@ class EditNoteAction:
         client_id_hint = args.get("client_id")
         appointment_id_hint = args.get("appointment_id")
 
-        if not note:
+        # Plan #6 Layer A — pick the appointment FIRST when client_name is
+        # empty. The note text may also still be empty here; the second-brain
+        # question loop handles missing-text via text-input AFTER the user
+        # picks an appointment.
+        if (
+            not name
+            and client_id_hint is None
+            and appointment_id_hint is None
+        ):
+            clarify = await _clarify_no_client(ctx, args)
+            if clarify is not None:
+                return clarify
+            # No candidates → fall through to the original FAIL paths below.
+
+        if not note and appointment_id_hint is None:
             return ActionResponse(
                 result=ActionResult.FAIL, text="Не понял текст заметки."
             )
@@ -164,3 +183,51 @@ class EditNoteAction:
         if updated is None:
             return ActionResponse(result=ActionResult.FAIL, text="Запись не найдена.")
         return ActionResponse(result=ActionResult.EXECUTED, text="✅ Заметка сохранена.")
+
+
+async def _clarify_no_client(
+    ctx: ActionContext, args: dict[str, Any]
+) -> ActionResponse | None:
+    """Plan #6 Layer A helper. Build a CLARIFY response listing candidate
+    appointments when the user said «добавь заметку» (and maybe a date) but
+    no client. Returns None if there are no candidates."""
+    appt_repo = AppointmentRepository(ctx.session)
+    date_iso = (args.get("date") or "").strip()
+    if date_iso:
+        try:
+            local_date = _date.fromisoformat(date_iso)
+        except ValueError:
+            return None
+        appts = await appt_repo.list_for_date(local_date, tz=ctx.tz)
+    else:
+        appts = await appt_repo.list_upcoming(now=ctx.now_utc, limit=10)
+
+    if not appts:
+        return None
+
+    client_repo = ClientRepository(ctx.session)
+    options: list[ClarifyOption] = []
+    for a in appts:
+        client = await client_repo.get(a.client_id)
+        client_name = client.name if client else "?"
+        if date_iso:
+            label = f"{client_name} — {format_local_time(a.starts_at, ctx.tz)}"
+        else:
+            label = f"{client_name} — {format_local_dt(a.starts_at, ctx.tz)}"
+        options.append(
+            ClarifyOption(
+                label=label,
+                payload={"appointment_id": a.id, "client_id": a.client_id},
+            )
+        )
+
+    prompt = (
+        f"На {date_iso} {len(options)} записей — к какой пишем заметку?"
+        if date_iso
+        else f"Ближайшие записи ({len(options)}) — к какой пишем заметку?"
+    )
+    return ActionResponse(
+        result=ActionResult.CLARIFY,
+        text=prompt,
+        clarify_options=options,
+    )

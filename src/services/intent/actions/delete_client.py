@@ -45,8 +45,13 @@ class DeleteClientAction:
 
         if client_id_hint is None:
             if not name:
+                # Plan #6 Layer A — list candidate clients instead of FAILing.
+                clarify = await _clarify_no_name(ctx)
+                if clarify is not None:
+                    return clarify
                 return ActionResponse(
-                    result=ActionResult.FAIL, text="Не понял имя клиента."
+                    result=ActionResult.FAIL,
+                    text="Нет ни одного клиента в базе.",
                 )
             candidates = await resolve_client(ctx.session, name)
             if not candidates:
@@ -104,3 +109,24 @@ class DeleteClientAction:
         if not deleted:
             return ActionResponse(result=ActionResult.FAIL, text="Клиент уже удалён.")
         return ActionResponse(result=ActionResult.EXECUTED, text="✅ Клиент удалён.")
+
+
+async def _clarify_no_name(ctx: ActionContext) -> ActionResponse | None:
+    """Plan #6 Layer A helper. List recent clients (up to 20) so the user
+    can pick which one to delete when no name was given."""
+    repo = ClientRepository(ctx.session)
+    clients = await repo.list_recent(limit=20)
+    if not clients:
+        return None
+    options = [
+        ClarifyOption(
+            label=client_label(c.name, c.instagram, idx),
+            payload={"client_id": c.id},
+        )
+        for idx, c in enumerate(clients)
+    ]
+    return ActionResponse(
+        result=ActionResult.CLARIFY,
+        text=f"{len(options)} клиент(ов) — какого удалить?",
+        clarify_options=options,
+    )
