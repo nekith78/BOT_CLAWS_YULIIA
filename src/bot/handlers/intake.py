@@ -369,7 +369,10 @@ async def _render(
         await state.set_state(IntakePending.confirming)
         await _replace_status(
             bot, chat_id, status_msg_id, response.text,
-            reply_markup=confirm_card_kb(tag=tag),
+            reply_markup=confirm_card_kb(
+                tag=tag,
+                editable_fields=response.editable_fields,
+            ),
         )
         return
     if response.result is ActionResult.CLARIFY:
