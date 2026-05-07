@@ -688,6 +688,17 @@ async def _render_sb_question(
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
         return
+    if question.editor == "client_choice":
+        # Two sb_pick buttons + cancel — same callback shape as the
+        # appointment picker, just different option labels.
+        from src.services.intent.text_normalizer import ClarifyOption
+
+        choice_opts: list[ClarifyOption] = list(question.options or [])
+        await _replace_status(
+            bot, chat_id, msg_id, question.prompt,
+            reply_markup=appointment_picker_kb(options=choice_opts, tag=tag),
+        )
+        return
     if question.editor == "calendar":
         anchor = datetime.now(timezone.utc).date()
         cancel_cd = IntakeCD(action="cancel_edit", tag=tag).pack()

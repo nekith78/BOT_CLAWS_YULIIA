@@ -518,6 +518,94 @@ async def test_decide_next_asks_for_note_text(session: AsyncSession) -> None:
     assert result.question.editor == "text_input"
 
 
+async def test_create_appointment_asks_existing_or_new_first(
+    session: AsyncSession,
+) -> None:
+    """«создай запись на завтра» — name missing. We must NOT immediately
+    list existing clients; first ask binary «existing or new?»."""
+    from datetime import date as _date
+
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    await repo.create(name="Ира")  # there ARE clients in DB; still ask choice
+
+    entities = {"verb": "create_appointment", "date": "2026-05-09"}
+    result = await decide_next(entities, _date(2026, 5, 8), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.field == "client_choice"
+    assert result.question.editor == "client_choice"
+    assert result.question.options is not None
+    labels = [o.label for o in result.question.options]
+    assert any("Из списка" in lbl for lbl in labels)
+    assert any("Новый" in lbl for lbl in labels)
+
+
+async def test_create_appointment_after_choice_existing_lists_clients(
+    session: AsyncSession,
+) -> None:
+    from datetime import date as _date
+
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+    await repo.create(name="Ира")
+    await repo.create(name="Маша")
+
+    entities = {
+        "verb": "create_appointment",
+        "date": "2026-05-09",
+        "client_choice": "existing",
+    }
+    result = await decide_next(entities, _date(2026, 5, 8), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.editor == "client_picker"
+    assert result.question.options is not None
+    assert {opt.label for opt in result.question.options} >= {"Ира", "Маша"}
+
+
+async def test_create_appointment_after_choice_new_asks_for_name(
+    session: AsyncSession,
+) -> None:
+    from datetime import date as _date
+
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+
+    entities = {
+        "verb": "create_appointment",
+        "date": "2026-05-09",
+        "client_choice": "new",
+    }
+    result = await decide_next(entities, _date(2026, 5, 8), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.field == "name"
+    assert result.question.editor == "text_input"
+    assert "Имя" in result.question.prompt
+
+
+async def test_create_appointment_existing_with_no_clients_falls_to_text_input(
+    session: AsyncSession,
+) -> None:
+    """«Из списка» when DB is empty must NOT dead-end. Fall back to
+    text-input so the user can still create the appointment."""
+    from datetime import date as _date
+
+    repo = ClientRepository(session)
+    appt_repo = AppointmentRepository(session)
+
+    entities = {
+        "verb": "create_appointment",
+        "date": "2026-05-09",
+        "client_choice": "existing",
+    }
+    result = await decide_next(entities, _date(2026, 5, 8), repo, appt_repo)
+    assert result.kind == "needs_clarification"
+    assert result.question is not None
+    assert result.question.editor == "text_input"
+
+
 # Sanity — NormalizationResult is exposed.
 def test_normalization_result_dataclass() -> None:
     r = NormalizationResult(kind="no_verb_detected")

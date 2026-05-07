@@ -486,6 +486,8 @@ class ClarifyQuestion:
         "appointment_ref",
         "note_text",
         "client",
+        "client_choice",
+        "name",
         "date",
         "time",
         "new_date",
@@ -497,6 +499,7 @@ class ClarifyQuestion:
         "time_picker",
         "appointment_picker",
         "client_picker",
+        "client_choice",
         "text_input",
     ]
     options: list[ClarifyOption] | None = None
@@ -800,6 +803,34 @@ async def _build_question(
         )
 
     if next_field == "name":
+        # For create_appointment we don't immediately list existing clients —
+        # the user might want to record an appointment for someone NEW. So
+        # ask the binary choice first, then on the next iteration route to
+        # client_picker (existing) or text_input (new).
+        choice = entities.get("client_choice")
+        if choice is None:
+            return ClarifyQuestion(
+                field="client_choice",
+                prompt="Запись для существующего клиента или для нового?",
+                editor="client_choice",
+                options=[
+                    ClarifyOption(
+                        label="📋 Из списка",
+                        value={"client_choice": "existing"},
+                    ),
+                    ClarifyOption(
+                        label="➕ Новый клиент",
+                        value={"client_choice": "new"},
+                    ),
+                ],
+            )
+        if choice == "new":
+            return ClarifyQuestion(
+                field="name",
+                prompt="Имя нового клиента:",
+                editor="text_input",
+            )
+        # choice == "existing"
         clients = await repo.list_recent(limit=10)
         options = [
             ClarifyOption(
@@ -808,6 +839,14 @@ async def _build_question(
             )
             for c in clients
         ]
+        if not options:
+            # No clients in DB yet — offer text-input fallback so the flow
+            # doesn't dead-end with «📋 Пусто».
+            return ClarifyQuestion(
+                field="name",
+                prompt="В базе пока нет клиентов. Имя нового клиента:",
+                editor="text_input",
+            )
         return ClarifyQuestion(
             field="client",
             prompt="Какой клиент?",
