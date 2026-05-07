@@ -12,13 +12,18 @@ shared with the action tests (`session`).
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.services.intent.text_normalizer import (
+    denormalize_forms,
     detect_verb,
     extract_instagram,
     extract_name_candidate,
     extract_note,
+    levenshtein,
+    resolve_client_candidate,
 )
+from src.storage.repositories.clients import ClientRepository
 
 
 @pytest.mark.parametrize(
@@ -161,3 +166,106 @@ def test_extract_name_candidate(
     phrase: str, verb: str, expected: str | None
 ) -> None:
     assert extract_name_candidate(phrase, verb) == expected
+
+
+# --- denormalize_forms -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "candidate, expected_nom",
+    [
+        ("Иру", "Ира"),
+        ("Машу", "Маша"),
+        ("Юлю", "Юля"),
+        ("Иры", "Ира"),
+        ("Маши", "Маша"),
+        ("Юли", "Юля"),
+        ("Ире", "Ира"),
+        ("Ира", "Ира"),  # already nominative — must still appear
+        ("Маша", "Маша"),
+    ],
+)
+def test_denormalize_forms_contains_expected(
+    candidate: str, expected_nom: str
+) -> None:
+    forms = denormalize_forms(candidate)
+    assert expected_nom in forms
+    # The candidate as-is must always appear too — used as a fallback.
+    assert candidate in forms
+
+
+# --- levenshtein -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "a, b, expected",
+    [
+        ("", "", 0),
+        ("a", "a", 0),
+        ("Ира", "Ира", 0),
+        # single edits
+        ("a", "ab", 1),  # insert
+        ("ab", "a", 1),  # delete
+        ("a", "b", 1),  # substitute
+        ("Ира", "Ера", 1),
+        ("Ира", "Ирa", 1),  # latin a swapped in
+        # two-plus edits
+        ("кот", "крот", 1),
+        ("abc", "xyz", 3),
+        ("Ира", "Юра", 1),  # И → Ю
+    ],
+)
+def test_levenshtein(a: str, b: str, expected: int) -> None:
+    assert levenshtein(a, b) == expected
+
+
+# --- resolve_client_candidate (async, needs session) ----------------------
+
+
+async def test_resolve_finds_via_denormalisation(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    ira = await repo.create(name="Ира")
+
+    name, cid = await resolve_client_candidate("Иру", repo)
+    assert name == "Ира"
+    assert cid == ira.id
+
+
+async def test_resolve_handles_masha(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    masha = await repo.create(name="Маша")
+
+    name, cid = await resolve_client_candidate("Машу", repo)
+    assert name == "Маша"
+    assert cid == masha.id
+
+
+async def test_resolve_uses_levenshtein_for_typos(session: AsyncSession) -> None:
+    """«Ера» → «Ира» via Levenshtein ≤ 1 fallback."""
+    repo = ClientRepository(session)
+    ira = await repo.create(name="Ира")
+
+    name, cid = await resolve_client_candidate("Ера", repo)
+    assert name == "Ира"
+    assert cid == ira.id
+
+
+async def test_resolve_returns_first_form_when_db_empty(
+    session: AsyncSession,
+) -> None:
+    repo = ClientRepository(session)
+    name, cid = await resolve_client_candidate("Иру", repo)
+    assert name == "Ира"
+    assert cid is None
+
+
+async def test_resolve_no_match_returns_first_form(session: AsyncSession) -> None:
+    """DB has unrelated names; resolve returns the denormalised form (no id)
+    so create_appointment can use it as a new-client name."""
+    repo = ClientRepository(session)
+    await repo.create(name="Аня")
+    await repo.create(name="Юра")
+
+    name, cid = await resolve_client_candidate("Юлю", repo)
+    assert name == "Юля"
+    assert cid is None

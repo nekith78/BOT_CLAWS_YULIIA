@@ -18,6 +18,10 @@ Pure functions only — no aiogram imports, no LLM imports.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.storage.repositories.clients import ClientRepository
 
 # --- vocabulary ------------------------------------------------------------
 #
@@ -353,4 +357,103 @@ def extract_name_candidate(text: str, verb: str) -> str | None:
     # Trailing punctuation on the last token (e.g., «Иру:») is unlikely
     # because our regex already excludes punctuation, but be safe.
     return " ".join(collected).strip(" :,.")
+
+
+# --- name resolution: morphology + DB fuzzy match -------------------------
+#
+# Tiny suffix-replacement table, no `pymorphy2` dep. Covers the common
+# female-name accusative / genitive / dative forms that show up in voice
+# commands («Иру/Машу/Юлю/Ире/Ирe/Маши/Юли»).
+
+_DENORMALIZE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # accusative -у → -а  (Иру → Ира, Машу → Маша, Аню → Аня)
+    ("у", ("а",)),
+    # accusative -ю → -я  (Юлю → Юля, Катю → Катя)
+    ("ю", ("я",)),
+    # genitive  -ы → -а  (Иры → Ира)
+    ("ы", ("а",)),
+    # genitive/prepositional -и → -а / -я  (Маши → Маша, Юли → Юля)
+    ("и", ("а", "я")),
+    # dative/prepositional -е → -а / -я    (Ире → Ира, Маше → Маша)
+    ("е", ("а", "я")),
+)
+
+
+def denormalize_forms(candidate: str) -> list[str]:
+    """Return possible nominative forms for `candidate`. Always includes
+    the candidate as-is at the front (user might already speak in nominative)."""
+    candidate = candidate.strip()
+    if not candidate:
+        return []
+    seen = {candidate}
+    forms = [candidate]
+    last_char = candidate[-1].lower()
+    for suffix, replacements in _DENORMALIZE_RULES:
+        if last_char == suffix:
+            stem = candidate[:-1]
+            for rep in replacements:
+                form = stem + rep
+                if form not in seen:
+                    seen.add(form)
+                    forms.append(form)
+    return forms
+
+
+def levenshtein(a: str, b: str) -> int:
+    """Edit distance between `a` and `b`. Standard DP, two-row variant —
+    fast enough for the small client lists in this bot (<100 entries)."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            curr[j] = min(
+                curr[j - 1] + 1,    # insert
+                prev[j] + 1,        # delete
+                prev[j - 1] + cost,  # substitute
+            )
+        prev = curr
+    return prev[-1]
+
+
+async def resolve_client_candidate(
+    candidate: str,
+    repo: ClientRepository,
+) -> tuple[str, int | None]:
+    """Try to map a possibly-inflected name to a real client.
+
+    Strategy:
+        1. Generate denormalised forms.
+        2. Try EXACT case-insensitive match against the DB for each form.
+        3. Fall back to Levenshtein ≤ 1 over all clients.
+        4. Otherwise return the first denormalised form (good for create-new).
+
+    Returns `(name, client_id_or_None)` — name is canonical when matched."""
+    forms = denormalize_forms(candidate)
+    if not forms:
+        return candidate, None
+
+    for form in forms:
+        client = await repo.find_by_name_ci(form)
+        if client is not None:
+            return client.name, client.id
+
+    # Fuzzy fallback. Compare each form against every client name.
+    all_clients = await repo.list_all()
+    for client in all_clients:
+        target = client.name.lower()
+        for form in forms:
+            if levenshtein(form.lower(), target) <= 1:
+                return client.name, client.id
+
+    # No match — pick the most likely nominative as the new-client name.
+    # Index 0 is the candidate as-is; index 1+ are denormalised. Prefer 1
+    # if denormalisation produced anything, else fall back to 0.
+    return (forms[1] if len(forms) > 1 else forms[0]), None
 
