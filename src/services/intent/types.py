@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -88,6 +88,26 @@ class ClarifyOption:
 
 
 @dataclass(frozen=True)
+class EditableField:
+    """Declares one field of a CONFIRM-state action that the user can
+    edit in place via «✏️ Изменить <label>» on the confirm-card.
+
+    The handler uses `editor` to pick the right UI sub-flow: inline
+    calendar, time picker, client picker, or text input. After the user
+    finishes editing, the new value gets merged into the action's pending
+    payload and `Action.plan` is called again — no fresh LLM call.
+
+    `prompt_text` is mandatory only when `editor="text_input"`; the
+    handler shows it as the question above the input. Ignored otherwise.
+    """
+
+    key: str
+    label: str
+    editor: Literal["calendar", "time_picker", "client_picker", "text_input"]
+    prompt_text: str | None = None
+
+
+@dataclass(frozen=True)
 class ActionResponse:
     """Return value of `Action.plan` and `Action.execute`.
 
@@ -110,6 +130,11 @@ class ActionResponse:
     # next LLM call sees what the bot just showed — enables follow-ups
     # like «удали эту запись» referring back to a list.
     context_snapshot: dict[str, Any] | None = None
+    # `editable_fields` (CONFIRM-only) declares which payload keys the
+    # user may edit in place from the confirm-card via «✏️ Изменить ...»
+    # buttons. The intake handler renders them dynamically; on edit the
+    # action's `plan()` is re-called with the merged payload (no LLM hit).
+    editable_fields: list[EditableField] | None = None
 
 
 @dataclass(frozen=True)

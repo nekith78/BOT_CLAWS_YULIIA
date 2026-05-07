@@ -24,3 +24,24 @@ def test_confirm_card_layout_save_alone_then_edit_cancel() -> None:
     assert len(kb.inline_keyboard) == 2
     assert len(kb.inline_keyboard[0]) == 1   # ✅ takes its own row
     assert len(kb.inline_keyboard[1]) == 2   # ✏️ + ❌ share the second row
+
+
+# --- Edit-field button rendering (Plan #5 Task 1+2) ----------------------
+
+
+def test_intake_cd_round_trips_edit_field() -> None:
+    """The expanded callback factory should accept and recover edit_field
+    actions with both `tag` and `field` payload."""
+    packed = IntakeCD(action="edit_field", tag="abc", field="date").pack()
+    decoded = IntakeCD.unpack(packed)
+    assert decoded.action == "edit_field"
+    assert decoded.tag == "abc"
+    assert decoded.field == "date"
+
+
+def test_intake_cd_round_trips_cancel_edit() -> None:
+    packed = IntakeCD(action="cancel_edit", tag="abc").pack()
+    decoded = IntakeCD.unpack(packed)
+    assert decoded.action == "cancel_edit"
+    assert decoded.tag == "abc"
+    assert decoded.field == ""

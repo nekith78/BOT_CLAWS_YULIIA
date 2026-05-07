@@ -79,22 +79,29 @@ class SettingsCD(CallbackData, prefix="settings", sep="|"):
 class IntakeCD(CallbackData, prefix="intake", sep="|"):
     """Voice/text intake confirm-card and disambiguation buttons.
 
-    - action="confirm": user pressed ✅ — execute the pending action.
-    - action="edit":    user pressed ✏️ Изменить — handoff into the
-                        AddAppointment FSM with pre-filled fields.
-    - action="cancel":  user pressed ❌ — drop pending state with
-                        «❌ Отменено».
-    - action="clarify": user picked one disambiguation option — `tag`
-                        plus `index` identify the chosen option.
+    - action="confirm":    user pressed ✅ — execute the pending action.
+    - action="edit":       user pressed ✏️ Изменить полностью — handoff
+                           into the AddAppointment FSM with pre-filled fields
+                           (currently a stub; future work).
+    - action="cancel":     user pressed ❌ — drop pending state with
+                           «❌ Отменено».
+    - action="clarify":    user picked one disambiguation option — `tag`
+                           plus `index` identify the chosen option.
+    - action="edit_field": user pressed ✏️ Изменить <field> — open the
+                           per-field editor; `field` carries the payload key
+                           ("date", "time", "client_name", "note", ...).
+    - action="cancel_edit": user pressed ❌ Отмена inside a text-input
+                            edit-flow — return to the confirm-card unchanged.
 
     `tag` is a short id for the pending action stashed in FSM data; it
     binds the keyboard click to the right server-side state.
     """
 
     v: int = 1
-    action: Literal["confirm", "edit", "cancel", "clarify"]
+    action: Literal["confirm", "edit", "cancel", "clarify", "edit_field", "cancel_edit"]
     tag: str = ""
     index: int = 0
+    field: str = ""
 
 
 class NotifyRuleCD(CallbackData, prefix="nr", sep="|"):
