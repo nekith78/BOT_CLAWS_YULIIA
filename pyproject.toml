@@ -75,6 +75,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S"]
+# Russian system-prompt has long lines that don't wrap cleanly inside an
+# f-string; line-length pedantry hurts readability without a real benefit.
+"src/services/intent/prompt.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"

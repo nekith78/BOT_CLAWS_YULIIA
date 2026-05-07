@@ -74,6 +74,20 @@ def build_system_prompt(
 
 Если в одной фразе несколько действий («запиши X и Y одновременно») —
 вызови tool для первого, второе пользователь повторит.
+
+ПРИМЕРЫ (как переводить речь в tool call — ориентируйся на этот формат):
+• «запиши Иру на завтра в 14:30» → create_appointment(client_name="Ира", date=<today+1>, time="14:30")
+• «запиши Олега завтра вечером» → create_appointment(client_name="Олег", date=<today+1>, time="18:00")
+• «запиши Машу на субботу в три» → create_appointment(client_name="Маша", date=<ближайшая суббота>, time="15:00")
+• «покажи записи на сегодня» → list_appointments(period="today")
+• «покажи записи на этой неделе» → list_appointments(period="week")
+• «покажи историю Кости» → list_client_history(client_name="Костя")
+• «перенеси Олега на 16:00» → move_appointment(client_name="Олег", new_time="16:00")
+• «перенеси Иру на 8 мая в 11:00» → move_appointment(client_name="Ира", new_date="2026-05-08", new_time="11:00")
+• «отмени запись Иры» → cancel_appointment(client_name="Ира")
+• «добавь к записи Иры заметку френч» → edit_note(client_name="Ира", note="френч")
+• «удали Иру» → delete_client(client_name="Ира")
+• «привет», «спасибо», «как дела» → НЕ вызывай никакую tool
 """
     if recent_turns:
         return base + _render_recent(recent_turns)
