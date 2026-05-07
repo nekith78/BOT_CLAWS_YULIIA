@@ -34,10 +34,17 @@ from src.bot.callback_data import (
     NotifyRuleCD,
     PeriodCD,
     SettingsCD,
+    TimeCD,
+    TimePartCD,
     WizardCD,
 )
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.period_picker import period_picker_kb
+from src.bot.keyboards.time_part_picker import (
+    time_hour_picker_kb,
+    time_minute_picker_kb,
+)
+from src.bot.keyboards.time_picker import time_picker_kb
 from src.bot.states import NotifySettings
 from src.bot.ui import advance, finalize, show_in_callback
 from src.services import settings_service
@@ -599,8 +606,8 @@ async def on_add_rule_kind_picked(
         await show_in_callback(
             callback,
             bot=bot,
-            text="Введи время в формате HH:MM:",
-            reply_markup=None,
+            text="Выбери время:",
+            reply_markup=time_picker_kb(),
         )
         await state.set_state(NotifySettings.adding_rule_time)
     else:
@@ -617,10 +624,114 @@ async def on_add_rule_kind_picked(
     await callback.answer()
 
 
+async def _commit_added_time_rule(
+    *,
+    bot: Bot,
+    state: FSMContext,
+    chat_id: int,
+    data: dict[str, Any],
+    hhmm: str,
+) -> None:
+    """Apply the picked HH:MM as the new notify rule + bounce back to the
+    rules-listing screen. Shared by the picker callback handlers and the
+    text-input fallback."""
+    state_data = await state.get_data()
+    appointment_id = int(state_data["notify_appointment_id"])
+    kind = state_data["adding_rule_kind"]
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    await _add_override_and_apply(
+        factory,
+        appointment_id=appointment_id,
+        kind=kind,
+        value=hhmm,
+        scheduler=data.get("scheduler"),
+        notify_runner=data.get("notify_runner"),
+    )
+    await advance(
+        bot, chat_id=chat_id, state=state,
+        text="✅ Правило добавлено.",
+        reply_markup=None,
+    )
+    # Hop back to the rules screen.
+    await _render_appt_rules_via_send(
+        bot, chat_id, factory=factory, appointment_id=appointment_id
+    )
+    await state.set_state(NotifySettings.viewing_rules)
+    await state.update_data(notify_appointment_id=appointment_id)
+
+
+@router.callback_query(NotifySettings.adding_rule_time, TimeCD.filter())
+async def on_add_rule_time_grid(
+    callback: CallbackQuery,
+    callback_data: TimeCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    if callback_data.hhmm == "custom":
+        await advance(
+            bot, chat_id=callback.message.chat.id, state=state,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+        await callback.answer()
+        return
+    await _commit_added_time_rule(
+        bot=bot, state=state, chat_id=callback.message.chat.id,
+        data=data, hhmm=callback_data.hhmm,
+    )
+    await callback.answer()
+
+
+@router.callback_query(NotifySettings.adding_rule_time, TimePartCD.filter())
+async def on_add_rule_time_part(
+    callback: CallbackQuery,
+    callback_data: TimePartCD,
+    state: FSMContext,
+    bot: Bot,
+    **data: Any,
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    chat_id = callback.message.chat.id
+    action = callback_data.action
+
+    if action == "hour":
+        await advance(
+            bot, chat_id=chat_id, state=state,
+            text=f"Минуты для {callback_data.hh:02d}:__",
+            reply_markup=time_minute_picker_kb(hh=callback_data.hh),
+        )
+    elif action == "minute":
+        hhmm = f"{callback_data.hh:02d}:{callback_data.mm:02d}"
+        await _commit_added_time_rule(
+            bot=bot, state=state, chat_id=chat_id, data=data, hhmm=hhmm,
+        )
+    elif action == "back_to_hours":
+        await advance(
+            bot, chat_id=chat_id, state=state,
+            text="Выбери час:",
+            reply_markup=time_hour_picker_kb(),
+        )
+    elif action == "back_to_grid":
+        await advance(
+            bot, chat_id=chat_id, state=state,
+            text="Выбери время:",
+            reply_markup=time_picker_kb(),
+        )
+    await callback.answer()
+
+
 @router.message(NotifySettings.adding_rule_time, F.text)
 async def on_add_rule_time_text(
     message: Message, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
+    """Text-input fallback — kept so power users can still type HH:MM
+    instead of tapping. Pickers are the primary path though."""
     if message.text is None:
         return
     raw = message.text.strip()
@@ -631,29 +742,10 @@ async def on_add_rule_time_text(
             chat_id=message.chat.id, text="Не понял формат. Попробуй HH:MM:"
         )
         return
-    state_data = await state.get_data()
-    appointment_id = int(state_data["notify_appointment_id"])
-    kind = state_data["adding_rule_kind"]
-    factory = cast(async_sessionmaker[Any], data["session_factory"])
-    await _add_override_and_apply(
-        factory,
-        appointment_id=appointment_id,
-        kind=kind,
-        value=raw[:5],
-        scheduler=data.get("scheduler"),
-        notify_runner=data.get("notify_runner"),
+    await _commit_added_time_rule(
+        bot=bot, state=state, chat_id=message.chat.id,
+        data=data, hhmm=raw[:5],
     )
-    await advance(
-        bot, chat_id=message.chat.id, state=state,
-        text="✅ Правило добавлено.",
-        reply_markup=None,
-    )
-    # Hop back to the rules screen.
-    await _render_appt_rules_via_send(
-        bot, message.chat.id, factory=factory, appointment_id=appointment_id
-    )
-    await state.set_state(NotifySettings.viewing_rules)
-    await state.update_data(notify_appointment_id=appointment_id)
 
 
 @router.message(NotifySettings.adding_rule_offset, F.text)

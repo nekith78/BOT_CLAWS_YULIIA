@@ -492,6 +492,124 @@ async def _save_time_and_advance(
     await state.set_state(AddAppointment.entering_note)
 
 
+# ---------- voice/text shortcut at the time step ----------------------------
+#
+# So the user can just say or type «16:30» / «время 16 30» mid-wizard
+# without tapping the grid. Handles text + voice (via STT). Falls back
+# silently when no time-shaped substring appears in the text — the user
+# can always reach for the picker buttons.
+
+import re as _re  # noqa: E402 — keep the helper local to this section
+
+_TIME_PATTERN = _re.compile(r"(\d{1,2})\s*[:.\-_/ ]\s*(\d{2})")
+
+
+def _parse_time_from_text(raw: str) -> str | None:
+    """Pull HH:MM out of free text. Whisper usually digit-formats Russian
+    voice numbers («шестнадцать тридцать» → «16:30») so a digit-pattern
+    regex covers most realistic transcripts."""
+    m = _TIME_PATTERN.search(raw)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if 0 <= hh < 24 and 0 <= mm < 60:
+        return f"{hh:02d}:{mm:02d}"
+    return None
+
+
+@router.message(AddAppointment.choosing_time, F.text)
+async def on_choosing_time_text(
+    message: Message, state: FSMContext, bot: Bot, **_: Any
+) -> None:
+    if message.text is None:
+        return
+    parsed = _parse_time_from_text(message.text)
+    if parsed is None:
+        await bot.send_message(
+            chat_id=message.chat.id,
+            text="Не понял время. Используй кнопки сверху или напиши <code>HH:MM</code>.",
+        )
+        return
+    await _save_time_and_advance(
+        bot, chat_id=message.chat.id, state=state, hhmm=parsed
+    )
+
+
+@router.message(AddAppointment.choosing_time, F.voice)
+async def on_choosing_time_voice(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    if message.voice is None:
+        return
+    settings = data.get("settings")
+    stt = data.get("stt")
+    if stt is None or settings is None:
+        return
+    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
+        await bot.send_message(
+            message.chat.id,
+            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
+        )
+        return
+    file = await bot.get_file(message.voice.file_id)
+    if file.file_path is None:
+        return
+    import io as _io
+
+    buf = _io.BytesIO()
+    await bot.download_file(file.file_path, buf)
+    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    log.info("addappt time voice → %r", transcript)
+    parsed = _parse_time_from_text(transcript)
+    if parsed is None:
+        await bot.send_message(
+            message.chat.id,
+            f"Не услышал время в «{html.escape(transcript) if transcript else '...'}». "
+            "Попробуй кнопками или напиши HH:MM.",
+        )
+        return
+    await _save_time_and_advance(
+        bot, chat_id=message.chat.id, state=state, hhmm=parsed
+    )
+
+
+@router.message(AddAppointment.entering_note, F.voice)
+async def on_entering_note_voice(
+    message: Message, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """Voice during the note step — transcribe and use as the note text."""
+    if message.voice is None:
+        return
+    settings = data.get("settings")
+    stt = data.get("stt")
+    if stt is None or settings is None:
+        return
+    if (message.voice.duration or 0) > settings.voice_max_duration_sec:
+        await bot.send_message(
+            message.chat.id,
+            f"Слишком длинное сообщение — до {settings.voice_max_duration_sec} сек.",
+        )
+        return
+    file = await bot.get_file(message.voice.file_id)
+    if file.file_path is None:
+        return
+    import io as _io
+
+    buf = _io.BytesIO()
+    await bot.download_file(file.file_path, buf)
+    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    if not transcript:
+        await bot.send_message(message.chat.id, "Не услышал ничего.")
+        return
+    log.info("addappt note voice → %r", transcript)
+    # Same path on_note_text takes — store + go to confirm.
+    await state.update_data(visit_note=transcript)
+    await _show_confirm(
+        bot, chat_id=message.chat.id, state=state, factory=data["session_factory"]
+    )
+
+
 def _skip_kb() -> Any:
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
