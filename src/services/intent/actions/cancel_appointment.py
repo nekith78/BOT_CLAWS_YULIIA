@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import html
+from datetime import date as _date
 from typing import Any, ClassVar
 
-from src.services.intent.actions._common import client_label, format_local_dt
+from src.services.intent.actions._common import (
+    client_label,
+    format_local_dt,
+    format_local_time,
+)
 from src.services.intent.resolvers import resolve_appointment, resolve_client
 from src.services.intent.types import (
     ActionContext,
@@ -56,7 +61,19 @@ class CancelAppointmentAction:
         # Resolve client.
         if client_id_hint is None:
             if not name:
-                return ActionResponse(result=ActionResult.FAIL, text="Не понял имя клиента.")
+                # Plan #6 Layer A — «отмени запись» / «отмени запись на ДАТУ»
+                # without a client name. Instead of refusing, show the user a
+                # list of candidate appointments and let them pick one.
+                clarify = await _clarify_no_client(ctx, args)
+                if clarify is not None:
+                    return clarify
+                return ActionResponse(
+                    result=ActionResult.FAIL,
+                    text="На эту дату записей нет.",
+                ) if args.get("date") else ActionResponse(
+                    result=ActionResult.FAIL,
+                    text="Нет ни одной активной записи.",
+                )
             candidates = await resolve_client(ctx.session, name)
             if not candidates:
                 return ActionResponse(
@@ -156,3 +173,53 @@ class CancelAppointmentAction:
         )
 
         return ActionResponse(result=ActionResult.EXECUTED, text="✅ Отменено.")
+
+
+async def _clarify_no_client(
+    ctx: ActionContext, args: dict[str, Any]
+) -> ActionResponse | None:
+    """Plan #6 Layer A helper. Build a CLARIFY response listing candidate
+    appointments when the user said «отмени запись» (and maybe a date) but
+    no client. Returns None if there are no candidates — caller emits FAIL."""
+    appt_repo = AppointmentRepository(ctx.session)
+    date_iso = (args.get("date") or "").strip()
+    if date_iso:
+        try:
+            local_date = _date.fromisoformat(date_iso)
+        except ValueError:
+            return None
+        appts = await appt_repo.list_for_date(local_date, tz=ctx.tz)
+    else:
+        appts = await appt_repo.list_upcoming(now=ctx.now_utc, limit=10)
+
+    if not appts:
+        return None
+
+    # Resolve client names for label rendering. Single fetch loop — client
+    # lists are small in this bot.
+    client_repo = ClientRepository(ctx.session)
+    options: list[ClarifyOption] = []
+    for a in appts:
+        client = await client_repo.get(a.client_id)
+        client_name = client.name if client else "?"
+        if date_iso:
+            label = f"{client_name} — {format_local_time(a.starts_at, ctx.tz)}"
+        else:
+            label = f"{client_name} — {format_local_dt(a.starts_at, ctx.tz)}"
+        options.append(
+            ClarifyOption(
+                label=label,
+                payload={"appointment_id": a.id, "client_id": a.client_id},
+            )
+        )
+
+    prompt = (
+        f"На {date_iso} {len(options)} записей — какую отменить?"
+        if date_iso
+        else f"Ближайшие записи ({len(options)}) — какую отменить?"
+    )
+    return ActionResponse(
+        result=ActionResult.CLARIFY,
+        text=prompt,
+        clarify_options=options,
+    )
