@@ -733,7 +733,7 @@ async def _list_candidate_appointments(
 
     # No date — fall back to upcoming, possibly narrowed by name.
     upcoming = await appt_repo.list_upcoming(
-        now=datetime.utcnow(), limit=20
+        now=datetime.now(tz=timezone.utc).replace(tzinfo=None), limit=20
     )
     if name:
         client = await repo.find_by_name_ci(name)
