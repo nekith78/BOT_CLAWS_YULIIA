@@ -42,6 +42,7 @@ from src.bot.keyboards.time_part_picker import (
     time_minute_picker_kb,
 )
 from src.bot.keyboards.time_picker import time_picker_kb
+from src.bot.relative_date import parse_relative_date
 from src.bot.skip_phrases import is_skip_phrase
 from src.bot.states import AddAppointment
 from src.bot.ui import advance, cancel, finalize
@@ -521,19 +522,63 @@ def _parse_time_from_text(raw: str) -> str | None:
 
 @router.message(AddAppointment.choosing_time, F.text)
 async def on_choosing_time_text(
-    message: Message, state: FSMContext, bot: Bot, **_: Any
+    message: Message, state: FSMContext, bot: Bot, **data: Any
 ) -> None:
     if message.text is None:
         return
-    parsed = _parse_time_from_text(message.text)
-    if parsed is None:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text="Не понял время. Используй кнопки сверху или напиши <code>HH:MM</code>.",
+    await _consume_text_at_time_step(
+        bot, state=state, chat_id=message.chat.id, raw=message.text, data=data
+    )
+
+
+async def _consume_text_at_time_step(
+    bot: Bot,
+    *,
+    state: FSMContext,
+    chat_id: int,
+    raw: str,
+    data: dict[str, Any],
+) -> None:
+    """Handle free text/voice transcript while bot is asking «Во сколько?».
+
+    Order of attempts:
+    1. HH:MM extraction → success → save and advance to note step.
+    2. Russian relative-date phrase («завтра», «в среду», «8.05») →
+       silently update `picked_date` in FSM and re-render the time picker
+       so the user can pick a time for the new date.
+    3. Otherwise: «Не понял».
+    """
+    parsed_time = _parse_time_from_text(raw)
+    if parsed_time is not None:
+        await _save_time_and_advance(
+            bot, chat_id=chat_id, state=state, hhmm=parsed_time
         )
         return
-    await _save_time_and_advance(
-        bot, chat_id=message.chat.id, state=state, hhmm=parsed
+
+    # No time match → maybe the user is correcting the date mid-wizard.
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    async with session_scope(factory) as session:
+        tz = await settings_service.get_timezone(session)
+    today_local = datetime.now(tz=tz).date()
+    new_date_iso = parse_relative_date(raw, today_local)
+    if new_date_iso is not None:
+        await state.update_data(picked_date=new_date_iso)
+        await advance(
+            bot,
+            chat_id=chat_id,
+            state=state,
+            text=(
+                f"📅 Дата обновлена на "
+                f"{format_date_ru(datetime.combine(date.fromisoformat(new_date_iso), time(0)))}.\n"
+                f"Во сколько?"
+            ),
+            reply_markup=time_picker_kb(),
+        )
+        return
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Не понял. Введи время <code>HH:MM</code> или нажми кнопку.",
     )
 
 
@@ -562,16 +607,11 @@ async def on_choosing_time_voice(
     await bot.download_file(file.file_path, buf)
     transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
     log.info("addappt time voice → %r", transcript)
-    parsed = _parse_time_from_text(transcript)
-    if parsed is None:
-        await bot.send_message(
-            message.chat.id,
-            f"Не услышал время в «{html.escape(transcript) if transcript else '...'}». "
-            "Попробуй кнопками или напиши HH:MM.",
-        )
+    if not transcript:
+        await bot.send_message(message.chat.id, "Не услышал ничего.")
         return
-    await _save_time_and_advance(
-        bot, chat_id=message.chat.id, state=state, hhmm=parsed
+    await _consume_text_at_time_step(
+        bot, state=state, chat_id=message.chat.id, raw=transcript, data=data
     )
 
 
