@@ -12,6 +12,7 @@ from src.services.intent.types import (
     ActionResponse,
     ActionResult,
     ClarifyOption,
+    EditableField,
 )
 from src.storage.repositories.appointments import AppointmentRepository
 from src.storage.repositories.clients import ClientRepository
@@ -140,6 +141,14 @@ class EditNoteAction:
             result=ActionResult.CONFIRM,
             text=text,
             pending_payload={"appointment_id": appt.id, "note": note},
+            editable_fields=[
+                EditableField(
+                    key="note",
+                    label="Заметка",
+                    editor="text_input",
+                    prompt_text="Напиши новую заметку:",
+                ),
+            ],
         )
 
     async def execute(

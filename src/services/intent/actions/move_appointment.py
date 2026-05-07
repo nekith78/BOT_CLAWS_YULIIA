@@ -20,6 +20,7 @@ from src.services.intent.types import (
     ActionResponse,
     ActionResult,
     ClarifyOption,
+    EditableField,
 )
 from src.services.notifications import reschedule_for_appointment
 from src.storage.repositories.appointments import AppointmentRepository
@@ -200,7 +201,13 @@ class MoveAppointmentAction:
             "new_starts_at_utc_iso": new_starts_utc.isoformat(),
         }
         return ActionResponse(
-            result=ActionResult.CONFIRM, text=text, pending_payload=payload
+            result=ActionResult.CONFIRM,
+            text=text,
+            pending_payload=payload,
+            editable_fields=[
+                EditableField(key="new_date", label="Новая дата", editor="calendar"),
+                EditableField(key="new_time", label="Новое время", editor="time_picker"),
+            ],
         )
 
     async def execute(

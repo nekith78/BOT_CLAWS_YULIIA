@@ -64,6 +64,22 @@ async def test_plan_clarifies_multiple_appointments(session: AsyncSession) -> No
     assert len(resp.clarify_options) == 2
 
 
+async def test_cancel_confirm_has_no_editable_fields(session: AsyncSession) -> None:
+    """cancel doesn't expose any per-field edit (only the binary
+    confirm/cancel choice)."""
+    client = await ClientRepository(session).create(name="Ира")
+    await AppointmentRepository(session).create(
+        client_id=client.id,
+        starts_at=_local_to_utc(date(2026, 5, 10), 11, 0),
+        duration_min=60,
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(ctx, {"client_name": "Ира"})
+    assert resp.result is ActionResult.CONFIRM
+    assert resp.editable_fields is None
+
+
 async def test_execute_marks_appointment_cancelled(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     appt = await AppointmentRepository(session).create(

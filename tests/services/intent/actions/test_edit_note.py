@@ -51,6 +51,28 @@ async def test_plan_returns_confirm_with_note_payload(session: AsyncSession) -> 
     }
 
 
+async def test_plan_confirm_declares_note_editable_field(
+    session: AsyncSession,
+) -> None:
+    client = await ClientRepository(session).create(name="Ира")
+    await AppointmentRepository(session).create(
+        client_id=client.id,
+        starts_at=_local_to_utc(date(2026, 5, 10), 11, 0),
+        duration_min=60,
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(ctx, {"client_name": "Ира", "note": "френч"})
+
+    assert resp.result is ActionResult.CONFIRM
+    assert resp.editable_fields is not None
+    assert len(resp.editable_fields) == 1
+    field = resp.editable_fields[0]
+    assert field.key == "note"
+    assert field.editor == "text_input"
+    assert field.prompt_text and "заметку" in field.prompt_text.lower()
+
+
 async def test_execute_updates_visit_note(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     appt = await AppointmentRepository(session).create(

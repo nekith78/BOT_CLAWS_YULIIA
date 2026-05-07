@@ -137,6 +137,32 @@ async def test_plan_fails_when_target_overlaps_other_booking(
     assert "уже" in resp.text.lower()
 
 
+async def test_plan_confirm_declares_two_editable_fields(
+    session: AsyncSession,
+) -> None:
+    """Move CONFIRM should expose new_date + new_time edit buttons.
+    Source-appointment identity is fixed at confirm time."""
+    client = await ClientRepository(session).create(name="Ира")
+    await AppointmentRepository(session).create(
+        client_id=client.id,
+        starts_at=_local_to_utc(date(2026, 5, 10), 11, 0),
+        duration_min=60,
+    )
+    ctx = build_ctx(session, now_local=datetime(2026, 5, 7, 12, 0))
+
+    resp = await ACTION.plan(
+        ctx, {"client_name": "Ира", "new_time": "14:00"}
+    )
+
+    assert resp.result is ActionResult.CONFIRM
+    assert resp.editable_fields is not None
+    keys = [f.key for f in resp.editable_fields]
+    assert keys == ["new_date", "new_time"]
+    editors = {f.key: f.editor for f in resp.editable_fields}
+    assert editors["new_date"] == "calendar"
+    assert editors["new_time"] == "time_picker"
+
+
 async def test_execute_reschedules_appointment(session: AsyncSession) -> None:
     client = await ClientRepository(session).create(name="Ира")
     appt = await AppointmentRepository(session).create(
