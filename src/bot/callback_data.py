@@ -98,7 +98,15 @@ class IntakeCD(CallbackData, prefix="intake", sep="|"):
     """
 
     v: int = 1
-    action: Literal["confirm", "edit", "cancel", "clarify", "edit_field", "cancel_edit"]
+    action: Literal[
+        "confirm",
+        "edit",
+        "cancel",
+        "clarify",
+        "edit_field",
+        "cancel_edit",
+        "back_to_confirm",
+    ]
     tag: str = ""
     index: int = 0
     field: str = ""

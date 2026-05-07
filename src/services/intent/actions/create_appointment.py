@@ -166,7 +166,8 @@ class CreateAppointmentAction:
                 EditableField(
                     key="client_name",
                     label="Имя клиента",
-                    editor="client_picker",
+                    editor="text_input",
+                    prompt_text="Напиши имя клиента:",
                 ),
                 EditableField(key="date", label="Дата", editor="calendar"),
                 EditableField(key="time", label="Время", editor="time_picker"),
@@ -174,7 +175,7 @@ class CreateAppointmentAction:
                     key="note",
                     label="Заметка",
                     editor="text_input",
-                    prompt_text="Напиши заметку (или /skip чтобы оставить пустой):",
+                    prompt_text="Напиши заметку:",
                 ),
                 EditableField(
                     key="instagram",

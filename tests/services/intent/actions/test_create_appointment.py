@@ -97,7 +97,9 @@ async def test_plan_confirm_declares_editable_fields(
     assert resp.editable_fields is not None
     by_key = {f.key: f for f in resp.editable_fields}
     assert set(by_key) == {"client_name", "date", "time", "note", "instagram"}
-    assert by_key["client_name"].editor == "client_picker"
+    # client_name uses text_input so user can type any new name
+    # (including new clients) instead of being limited to existing ones.
+    assert by_key["client_name"].editor == "text_input"
     assert by_key["date"].editor == "calendar"
     assert by_key["time"].editor == "time_picker"
     assert by_key["note"].editor == "text_input"

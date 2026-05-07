@@ -42,6 +42,7 @@ from src.bot.callback_data import (
 from src.bot.keyboards.calendar import calendar_kb
 from src.bot.keyboards.client_picker import client_picker_kb
 from src.bot.keyboards.confirm_card import confirm_card_kb
+from src.bot.keyboards.edit_field_picker import edit_field_picker_kb
 from src.bot.keyboards.time_part_picker import (
     time_hour_picker_kb,
     time_minute_picker_kb,
@@ -386,10 +387,7 @@ async def _render(
         await state.set_state(IntakePending.confirming)
         await _replace_status(
             bot, chat_id, status_msg_id, response.text,
-            reply_markup=confirm_card_kb(
-                tag=tag,
-                editable_fields=response.editable_fields,
-            ),
+            reply_markup=confirm_card_kb(tag=tag),
         )
         return
     if response.result is ActionResult.CLARIFY:
@@ -533,20 +531,60 @@ async def on_confirm_cancel(
 
 @router.callback_query(IntakePending.confirming, IntakeCD.filter(F.action == "edit"))
 async def on_edit(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, **_: Any
+    callback: CallbackQuery,
+    callback_data: IntakeCD,
+    state: FSMContext,
+    bot: Bot,
+    **_: Any,
 ) -> None:
-    """Handoff to manual flow — for MVP we drop the pending state and tell
-    the user to use the menu. Full FSM-handoff lands in a future polish task.
+    """User tapped «✏️ Изменить» — open the field-picker submenu.
+
+    If the action declared no editable fields (e.g. cancel/delete), we
+    fall back to an inline hint pointing at the manual menu — there's
+    nothing structured to edit per-field.
     """
     if callback.message is None:
         await callback.answer()
         return
-    await state.clear()
+    fsm = await state.get_data()
+    if fsm.get("intake_tag") != callback_data.tag:
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+    fields = _restore_editable_fields(fsm)
+    if not fields:
+        # No structured edit available — drop the pending state and hint.
+        await state.clear()
+        await _replace_status(
+            bot,
+            callback.message.chat.id,
+            callback.message.message_id,
+            "Это действие нельзя отредактировать по полям. Отмени и переделай командой.",
+        )
+        await callback.answer()
+        return
+
+    await state.set_state(IntakePending.choosing_edit_field)
     await _replace_status(
         bot,
         callback.message.chat.id,
         callback.message.message_id,
-        "Открой нужный пункт меню для ручного редактирования (+ Запись / 📋 Записи).",
+        "Что хочешь изменить?",
+        reply_markup=edit_field_picker_kb(tag=callback_data.tag, fields=fields),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    IntakePending.choosing_edit_field, IntakeCD.filter(F.action == "back_to_confirm")
+)
+async def on_back_to_confirm(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, **data: Any
+) -> None:
+    """User tapped «← Назад» on the field-picker — re-render the
+    confirm-card from current FSM args (no merge applied)."""
+    await _replan_after_edit(
+        callback=callback, state=state, bot=bot, data=data,
+        field_key="", new_args_patch={},
     )
     await callback.answer()
 
@@ -761,10 +799,7 @@ async def _replan_after_edit(
         await state.set_state(IntakePending.confirming)
         await _replace_status(
             bot, chat_id, msg_id, response.text,
-            reply_markup=confirm_card_kb(
-                tag=str(tag or ""),
-                editable_fields=response.editable_fields,
-            ),
+            reply_markup=confirm_card_kb(tag=str(tag or "")),
         )
     elif response.result is ActionResult.FAIL:
         # The edit broke something (e.g. past date). Show the error,
@@ -779,10 +814,7 @@ async def _replan_after_edit(
         )
         await _replace_status(
             bot, chat_id, msg_id, prev_text,
-            reply_markup=confirm_card_kb(
-                tag=str(tag or ""),
-                editable_fields=_restore_editable_fields(fsm),
-            ),
+            reply_markup=confirm_card_kb(tag=str(tag or "")),
         )
     else:
         # CLARIFY mid-edit is rare (e.g. resolve_client suddenly returned
@@ -809,7 +841,9 @@ def _restore_editable_fields(fsm_data: dict[str, Any]) -> list[EditableField] | 
     ]
 
 
-@router.callback_query(IntakePending.confirming, IntakeCD.filter(F.action == "edit_field"))
+@router.callback_query(
+    IntakePending.choosing_edit_field, IntakeCD.filter(F.action == "edit_field")
+)
 async def on_edit_field(
     callback: CallbackQuery,
     callback_data: IntakeCD,
@@ -1194,16 +1228,12 @@ async def _commit_text_field_edit(
         if confirm_msg_id:
             await _replace_status(
                 bot, chat_id, int(confirm_msg_id), response.text,
-                reply_markup=confirm_card_kb(
-                    tag=tag, editable_fields=response.editable_fields
-                ),
+                reply_markup=confirm_card_kb(tag=tag),
             )
         else:
             sent = await bot.send_message(
                 chat_id, response.text,
-                reply_markup=confirm_card_kb(
-                    tag=tag, editable_fields=response.editable_fields
-                ),
+                reply_markup=confirm_card_kb(tag=tag),
             )
             await state.update_data(intake_edit_msg_id=sent.message_id)
     else:

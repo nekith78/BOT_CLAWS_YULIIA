@@ -61,6 +61,7 @@ class IntakePending(StatesGroup):
 
     confirming = State()
     clarifying = State()
+    choosing_edit_field = State()       # «Изменить» tapped — submenu visible
     editing_field_picker = State()
     editing_field_text = State()
 
