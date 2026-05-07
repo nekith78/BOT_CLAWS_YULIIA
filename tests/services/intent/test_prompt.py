@@ -67,3 +67,32 @@ def test_prompt_includes_few_shot_examples_block() -> None:
         assert tool in prompt, f"missing example for {tool}"
     # Chit-chat negative example present.
     assert "привет" in prompt
+
+
+def test_prompt_has_layer_a_nudge() -> None:
+    """Plan #6 — when LLM picks a tool but a required field is missing,
+    the prompt nudges it to call the tool anyway so Layer A's CLARIFY
+    branch can fire instead of the LLM refusing outright."""
+    from src.services.intent.prompt import build_system_prompt
+
+    now = datetime(2026, 5, 7, 12, 0)
+    prompt = build_system_prompt(now_local=now, tz="Asia/Almaty")
+    # Looser anchor — exact phrasing may evolve.
+    lowered = prompt.lower()
+    assert "часть полей" in lowered or "сам спросит" in lowered or "не до конца" in lowered
+
+
+def test_is_canonical_appends_hint() -> None:
+    """Plan #6 Task 12 — `is_canonical=True` (used on the LLM #2 call
+    over the second-brain canonical text) appends a small hint telling
+    the model the input is already normalised."""
+    from src.services.intent.prompt import build_system_prompt
+
+    now = datetime(2026, 5, 7, 12, 0)
+    base = build_system_prompt(now_local=now, tz="Asia/Almaty")
+    canonical = build_system_prompt(now_local=now, tz="Asia/Almaty", is_canonical=True)
+
+    assert "нормализован" in canonical
+    assert "нормализован" not in base
+    # Canonical block sits at the END.
+    assert canonical.startswith(base.rstrip("\n").rstrip())
