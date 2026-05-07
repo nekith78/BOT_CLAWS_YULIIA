@@ -80,6 +80,52 @@ async def test_plan_returns_confirm_for_existing_unique_client(
     assert "Ира" in resp.text
 
 
+async def test_plan_confirm_declares_editable_fields(
+    session: AsyncSession,
+) -> None:
+    """CONFIRM card should expose 5 per-field edit buttons: client,
+    date, time, note, instagram. Each with the right editor type so
+    the intake handler dispatches to the right sub-flow."""
+    await ClientRepository(session).create(name="Ира")
+    ctx = build_ctx(session)
+
+    resp = await ACTION.plan(
+        ctx, {"client_name": "Ира", "date": "2026-05-10", "time": "11:00"}
+    )
+
+    assert resp.result is ActionResult.CONFIRM
+    assert resp.editable_fields is not None
+    by_key = {f.key: f for f in resp.editable_fields}
+    assert set(by_key) == {"client_name", "date", "time", "note", "instagram"}
+    assert by_key["client_name"].editor == "client_picker"
+    assert by_key["date"].editor == "calendar"
+    assert by_key["time"].editor == "time_picker"
+    assert by_key["note"].editor == "text_input"
+    assert by_key["note"].prompt_text and "Напиши" in by_key["note"].prompt_text
+    assert by_key["instagram"].editor == "text_input"
+
+
+async def test_plan_fail_or_clarify_responses_have_no_editable_fields(
+    session: AsyncSession,
+) -> None:
+    """FAIL/CLARIFY don't show a confirm-card, so editable_fields stays None."""
+    ctx = build_ctx(session)
+    resp_fail = await ACTION.plan(
+        ctx, {"client_name": "  ", "date": "2026-05-10", "time": "14:00"}
+    )
+    assert resp_fail.result is ActionResult.FAIL
+    assert resp_fail.editable_fields is None
+
+    repo = ClientRepository(session)
+    await repo.create(name="Ира")
+    await repo.create(name="Ира")
+    resp_clarify = await ACTION.plan(
+        ctx, {"client_name": "Ира", "date": "2026-05-10", "time": "11:00"}
+    )
+    assert resp_clarify.result is ActionResult.CLARIFY
+    assert resp_clarify.editable_fields is None
+
+
 async def test_plan_returns_clarify_for_multiple_matching_clients(
     session: AsyncSession,
 ) -> None:

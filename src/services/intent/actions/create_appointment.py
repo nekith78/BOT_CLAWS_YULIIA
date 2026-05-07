@@ -24,6 +24,7 @@ from src.services.intent.types import (
     ActionResponse,
     ActionResult,
     ClarifyOption,
+    EditableField,
 )
 from src.services.notifications import reschedule_for_appointment
 from src.storage.repositories.appointments import AppointmentRepository
@@ -161,6 +162,27 @@ class CreateAppointmentAction:
             result=ActionResult.CONFIRM,
             text=text,
             pending_payload=payload,
+            editable_fields=[
+                EditableField(
+                    key="client_name",
+                    label="Имя клиента",
+                    editor="client_picker",
+                ),
+                EditableField(key="date", label="Дата", editor="calendar"),
+                EditableField(key="time", label="Время", editor="time_picker"),
+                EditableField(
+                    key="note",
+                    label="Заметка",
+                    editor="text_input",
+                    prompt_text="Напиши заметку (или /skip чтобы оставить пустой):",
+                ),
+                EditableField(
+                    key="instagram",
+                    label="Instagram",
+                    editor="text_input",
+                    prompt_text="Напиши Instagram-ник (без @):",
+                ),
+            ],
         )
 
     async def execute(
