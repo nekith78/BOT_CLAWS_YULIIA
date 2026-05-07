@@ -128,3 +128,229 @@ def detect_verb(text: str) -> str | None:
         return "move_appointment"
 
     return None
+
+
+# --- entity extractors ----------------------------------------------------
+#
+# Each extractor returns `(value, cleaned_remainder)`. Returning the
+# remainder enables a two-pass design: the first pass strips note/instagram
+# segments so they don't pollute name/time/date detection on the second pass.
+
+
+# Two kinds of note markers:
+#  - keyword nouns that introduce the note text directly: «заметка», «заметку»,
+#    «с заметкой», «пометка», «пометку».
+#  - intro VERBS — «припиши», «допиши» — when they start the phrase, they get
+#    stripped, and an inner marker («что» or «:») separates the addressee from
+#    the note text. So «припиши Маше что ноготь треснул» splits into
+#    remainder=«Маше», note=«ноготь треснул».
+_NOTE_KEYWORD_MARKERS = (
+    "с заметкой",
+    "с пометкой",
+    "заметка",
+    "заметку",
+    "пометка",
+    "пометку",
+)
+_NOTE_INTRO_VERBS = ("припиши", "допиши")
+_NOTE_GLUE_RE = re.compile(r"^\s*(?:что|:|—|-)\s*", re.IGNORECASE)
+_NOTE_INNER_MARKER_RE = re.compile(r"\bчто\b|:", re.IGNORECASE)
+
+
+def extract_note(text: str) -> tuple[str | None, str]:
+    """Return `(note_or_None, text_with_note_segment_removed)`.
+
+    Two modes:
+    1. Phrase starts with «припиши»/«допиши» → strip the verb, find inner
+       «что»/«:» marker, split there.
+    2. Keyword marker found anywhere → split at the marker.
+    """
+    if not text:
+        return None, text
+
+    stripped = text.strip()
+    lowered = stripped.lower()
+
+    # Mode 1: note-intro verb at the start.
+    for verb in _NOTE_INTRO_VERBS:
+        if lowered.startswith(verb) and (
+            len(stripped) == len(verb) or stripped[len(verb)].isspace()
+        ):
+            after_verb = stripped[len(verb) :].lstrip()
+            m = _NOTE_INNER_MARKER_RE.search(after_verb)
+            if m:
+                before = after_verb[: m.start()].rstrip()
+                after = after_verb[m.end() :].strip()
+                if not after:
+                    return None, text
+                return after, before
+            # No inner marker — can't tell where the note starts. Bail.
+            return None, text
+
+    # Mode 2: keyword markers.
+    best_pos: int | None = None
+    best_marker_len = 0
+    for marker in _NOTE_KEYWORD_MARKERS:
+        idx = lowered.find(marker)
+        if idx >= 0 and (best_pos is None or idx < best_pos):
+            best_pos = idx
+            best_marker_len = len(marker)
+
+    if best_pos is None:
+        return None, text
+
+    before = stripped[:best_pos].rstrip()
+    after = stripped[best_pos + best_marker_len :]
+    after = _NOTE_GLUE_RE.sub("", after).strip()
+    if not after:
+        # «заметку» as a bare word with nothing after — no note.
+        return None, text
+    return after, before
+
+
+# `@handle` first; «инстаграм/инста/insta <handle>» second.
+_AT_HANDLE_RE = re.compile(r"@([A-Za-z0-9_.]+)")
+_IG_MARKER_RE = re.compile(
+    r"\b(?:инстаграм|инста|insta(?:gram)?)\s+@?([A-Za-z0-9_.]+)",
+    re.IGNORECASE,
+)
+
+
+def extract_instagram(text: str) -> tuple[str | None, str]:
+    """Return `(@handle_or_None, text_with_segment_removed)`.
+
+    Tries the «инстаграм/инста/insta <handle>» pattern first so the marker
+    word is also stripped from the remainder. Falls back to a bare `@handle`
+    anywhere in the text."""
+    if not text:
+        return None, text
+
+    m = _IG_MARKER_RE.search(text)
+    if m:
+        handle = "@" + m.group(1)
+        cleaned = (text[: m.start()] + text[m.end() :]).strip()
+        return handle, cleaned
+
+    m2 = _AT_HANDLE_RE.search(text)
+    if m2:
+        handle = "@" + m2.group(1)
+        cleaned = (text[: m2.start()] + text[m2.end() :]).strip()
+        return handle, cleaned
+
+    return None, text
+
+
+# --- name extraction ------------------------------------------------------
+#
+# Names sit positionally between the verb and the next anchor: a Russian
+# preposition, a date/time token, or end-of-string. We strip out filler
+# stop-words like «запись/клиент» that may sit between the verb and the
+# actual name.
+
+_NAME_STOPWORDS = {
+    # «запись»/«клиент» as object-nouns inside the command.
+    "запись",
+    "записи",
+    "записей",
+    "записью",
+    "клиент",
+    "клиента",
+    "клиентов",
+    "клиенту",
+    "клиенты",
+    # Date adjectives — never names. Covers «отмени завтрашнюю» and ilk.
+    "сегодняшнюю",
+    "сегодняшний",
+    "сегодняшнее",
+    "сегодняшняя",
+    "завтрашнюю",
+    "завтрашний",
+    "завтрашнее",
+    "завтрашняя",
+    "вчерашнюю",
+    "вчерашний",
+    "вчерашнее",
+    "вчерашняя",
+    # Bare relative-date words that could leak in.
+    "сегодня",
+    "завтра",
+    "послезавтра",
+    "вчера",
+    # Days of the week — can come after «отмени Иру в понедельник» but
+    # we stop on «в» preposition first, so listing them is defensive.
+    "понедельник",
+    "вторник",
+    "среду",
+    "среда",
+    "четверг",
+    "пятницу",
+    "пятница",
+    "субботу",
+    "суббота",
+    "воскресенье",
+}
+# Russian prepositions that anchor the END of the name slot.
+_NAME_END_PREPS = {"на", "к", "ко", "с", "со", "у", "во", "в", "о", "об"}
+# A token is "date/time-like" if it contains a digit anywhere — covers
+# «14», «14:30», «8.05», «2026-05-08».
+_DIGIT_RE = re.compile(r"\d")
+# Tokeniser preserving ordering of words; punctuation is dropped.
+_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+|\d[\d:.\-/]*", re.UNICODE)
+
+
+def extract_name_candidate(text: str, verb: str) -> str | None:
+    """Return the raw (possibly inflected) name candidate, or None.
+
+    `verb` is the output of `detect_verb` — for list verbs we don't try
+    to extract a name. The candidate is tokens between the verb and the
+    first anchor (preposition, date/time-like token, end-of-string),
+    minus stop-words like «запись»."""
+    if not text or verb in {"list_appointments", "list_clients"}:
+        return None
+
+    tokens = _WORD_RE.findall(text)
+    if not tokens:
+        return None
+    lowered = [t.lower() for t in tokens]
+
+    # Find the verb token. Any token in any verb set counts as the anchor.
+    verb_idx = -1
+    for i, tok in enumerate(lowered):
+        if (
+            tok in _VERBS_CREATE
+            or tok in _VERBS_CANCEL
+            or tok in _VERBS_RESCHEDULE
+            or tok in _VERBS_LIST
+            or tok in {"припиши", "допиши"}
+        ):
+            verb_idx = i
+            break
+    if verb_idx < 0:
+        return None
+
+    # Walk forward from verb+1 collecting Cyrillic word tokens until we
+    # hit an anchor.
+    collected: list[str] = []
+    for i in range(verb_idx + 1, len(tokens)):
+        tok = tokens[i]
+        low = lowered[i]
+        if low in _NAME_END_PREPS:
+            break
+        if _DIGIT_RE.search(tok):
+            break
+        if low in _NAME_STOPWORDS:
+            # Skip stop-words; keep walking — name may follow.
+            if collected:
+                break
+            continue
+        # Skip unrelated note marker stems if they sneak in (defensive).
+        if any(stem in low for stem in _STEM_NOTE):
+            break
+        collected.append(tok)
+
+    if not collected:
+        return None
+    # Trailing punctuation on the last token (e.g., «Иру:») is unlikely
+    # because our regex already excludes punctuation, but be safe.
+    return " ".join(collected).strip(" :,.")
+

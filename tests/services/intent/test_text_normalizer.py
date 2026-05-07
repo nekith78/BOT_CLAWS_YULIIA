@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.intent.text_normalizer import detect_verb
+from src.services.intent.text_normalizer import (
+    detect_verb,
+    extract_instagram,
+    extract_name_candidate,
+    extract_note,
+)
 
 
 @pytest.mark.parametrize(
@@ -60,3 +65,99 @@ from src.services.intent.text_normalizer import detect_verb
 )
 def test_detect_verb(phrase: str, expected: str | None) -> None:
     assert detect_verb(phrase) == expected
+
+
+# --- extract_note ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "phrase, expected_note, expected_remainder",
+    [
+        # marker word inside a longer phrase
+        (
+            "запиши Иру на завтра 14 заметка френч",
+            "френч",
+            "запиши Иру на завтра 14",
+        ),
+        (
+            "запиши Иру 14 заметка: френч с блёстками",
+            "френч с блёстками",
+            "запиши Иру 14",
+        ),
+        # «припиши Маше что ...» — the «что» after the marker is dropped.
+        (
+            "припиши Маше что ноготь треснул",
+            "ноготь треснул",
+            "Маше",
+        ),
+        # «с заметкой» phrasing
+        (
+            "поставь Юлю на 14 с заметкой гель не держится",
+            "гель не держится",
+            "поставь Юлю на 14",
+        ),
+        # No marker → returns (None, original).
+        ("отмени завтрашнюю", None, "отмени завтрашнюю"),
+        ("", None, ""),
+    ],
+)
+def test_extract_note(
+    phrase: str, expected_note: str | None, expected_remainder: str
+) -> None:
+    note, remainder = extract_note(phrase)
+    assert note == expected_note
+    assert remainder.strip() == expected_remainder.strip()
+
+
+# --- extract_instagram -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "phrase, expected_handle, expected_remainder",
+    [
+        ("@ira_nails", "@ira_nails", ""),
+        ("запиши Иру инстаграм @ira_nails", "@ira_nails", "запиши Иру"),
+        ("запиши Иру инста ira_nails", "@ira_nails", "запиши Иру"),
+        ("запиши Иру insta ira_nails", "@ira_nails", "запиши Иру"),
+        ("запиши Иру", None, "запиши Иру"),
+        ("", None, ""),
+    ],
+)
+def test_extract_instagram(
+    phrase: str, expected_handle: str | None, expected_remainder: str
+) -> None:
+    handle, remainder = extract_instagram(phrase)
+    assert handle == expected_handle
+    assert remainder.strip() == expected_remainder.strip()
+
+
+# --- extract_name_candidate ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "phrase, verb, expected",
+    [
+        ("запиши Иру на завтра в 14", "create_appointment", "Иру"),
+        ("запиши Машу на 14:30", "create_appointment", "Машу"),
+        # Skip the «запись» stop-word and pick the actual name.
+        ("отмени запись Маши на завтра", "cancel_appointment", "Маши"),
+        # Multi-word names — take everything until the next anchor.
+        (
+            "перенеси Анну Сергеевну на 16",
+            "move_appointment",
+            "Анну Сергеевну",
+        ),
+        # Anchor by date/time tokens, not just prepositions.
+        ("отмени Иру 14:30", "cancel_appointment", "Иру"),
+        # No name expected for list verbs.
+        ("покажи записи на завтра", "list_appointments", None),
+        ("покажи клиентов", "list_clients", None),
+        # Empty / nothing useful.
+        ("отмени завтрашнюю", "cancel_appointment", None),
+        ("", "create_appointment", None),
+    ],
+)
+def test_extract_name_candidate(
+    phrase: str, verb: str, expected: str | None
+) -> None:
+    assert extract_name_candidate(phrase, verb) == expected
