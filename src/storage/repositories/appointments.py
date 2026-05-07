@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date as _date
+from datetime import datetime, time, timedelta
+from datetime import timezone as _timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,6 +140,50 @@ class AppointmentRepository:
         if end is not None:
             stmt = stmt.where(Appointment.starts_at < end)
         stmt = stmt.order_by(desc(Appointment.starts_at))
+        result = await self._session.execute(stmt)
+        return list(result.scalars())
+
+    async def list_for_date(
+        self,
+        local_date: _date,
+        *,
+        tz: ZoneInfo,
+        statuses: tuple[str, ...] = ("scheduled",),
+    ) -> list[Appointment]:
+        """Appointments whose local-time start falls within `local_date`.
+
+        Storage is naive UTC; convert the local-day window to UTC and query.
+        Used by the smart-fallback action-tolerance path («какие записи на
+        завтра?») and by Layer A when CLARIFYing «отмени запись на дату»."""
+        local_start = datetime.combine(local_date, time(0, 0), tzinfo=tz)
+        local_end = local_start + timedelta(days=1)
+        utc_start = local_start.astimezone(_timezone.utc).replace(tzinfo=None)
+        utc_end = local_end.astimezone(_timezone.utc).replace(tzinfo=None)
+        return await self.list_in_range(
+            start=utc_start, end=utc_end, statuses=statuses
+        )
+
+    async def list_upcoming(
+        self,
+        *,
+        now: datetime,
+        limit: int = 10,
+        statuses: tuple[str, ...] = ("scheduled",),
+    ) -> list[Appointment]:
+        """Next `limit` appointments starting at-or-after `now`, ascending.
+
+        Used by the smart-fallback CLARIFY path when the user says something
+        like «отмени запись» without specifying date — we offer up to N
+        upcoming records to pick from."""
+        stmt = (
+            select(Appointment)
+            .where(
+                Appointment.starts_at >= now,
+                Appointment.status.in_(statuses),
+            )
+            .order_by(Appointment.starts_at)
+            .limit(limit)
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars())
 

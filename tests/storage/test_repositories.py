@@ -188,6 +188,108 @@ async def test_list_for_client_filters_by_window(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_by_name_ci_exact_match(session: AsyncSession) -> None:
+    """Plan #6 — case-insensitive EXACT match (not substring). Used by the
+    second-brain name resolver after denormalize_forms."""
+    repo = ClientRepository(session)
+    await repo.create(name="Ира")
+    await repo.create(name="Ирина")
+
+    found = await repo.find_by_name_ci("ира")
+    assert found is not None
+    assert found.name == "Ира"
+
+    # Substring should NOT match — "ирин" is not exact "Ира" or "Ирина".
+    assert await repo.find_by_name_ci("ирин") is None
+
+    # Exact case-insensitive of full name does match.
+    found_long = await repo.find_by_name_ci("ирина")
+    assert found_long is not None
+    assert found_long.name == "Ирина"
+
+
+@pytest.mark.asyncio
+async def test_find_by_name_ci_no_match(session: AsyncSession) -> None:
+    repo = ClientRepository(session)
+    await repo.create(name="Ира")
+    assert await repo.find_by_name_ci("маша") is None
+
+
+@pytest.mark.asyncio
+async def test_list_all_returns_every_client(session: AsyncSession) -> None:
+    """Plan #6 — needed for Levenshtein fallback over the whole client list."""
+    repo = ClientRepository(session)
+    for name in ["Ира", "Маша", "Юля", "Аня"]:
+        await repo.create(name=name)
+
+    rows = await repo.list_all()
+    assert {c.name for c in rows} == {"Ира", "Маша", "Юля", "Аня"}
+
+
+@pytest.mark.asyncio
+async def test_list_for_date_only_that_day(session: AsyncSession) -> None:
+    """Plan #6 — wraps list_in_range for a TZ-aware single-day window."""
+    from zoneinfo import ZoneInfo
+
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+    tz = ZoneInfo("Asia/Almaty")  # UTC+5
+
+    # Almaty 2026-05-08 09:00 == UTC 2026-05-08 04:00
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 4))
+    # Almaty 2026-05-08 23:30 == UTC 2026-05-08 18:30
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 18, 30))
+    # Almaty 2026-05-09 02:00 == UTC 2026-05-08 21:00 — same UTC day, NEXT
+    # Almaty day → must be excluded.
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 21))
+
+    from datetime import date
+    result = await appts.list_for_date(date(2026, 5, 8), tz=tz)
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_upcoming_sorted_ascending_with_limit(
+    session: AsyncSession,
+) -> None:
+    """Plan #6 — used when user says «отмени запись» without specifying which."""
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+
+    # 5 future appointments, intentionally inserted out of order.
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 10, 14))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 9))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 9, 16))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 12, 11))
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 11, 13))
+    # Past appointment — must be excluded.
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 1, 10))
+
+    result = await appts.list_upcoming(now=_utc(2026, 5, 7, 0), limit=3)
+    assert len(result) == 3
+    assert [a.starts_at for a in result] == [
+        _utc(2026, 5, 8, 9),
+        _utc(2026, 5, 9, 16),
+        _utc(2026, 5, 10, 14),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_upcoming_excludes_cancelled(session: AsyncSession) -> None:
+    clients = ClientRepository(session)
+    appts = AppointmentRepository(session)
+    client = await clients.create(name="A")
+    a1 = await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 8, 9))
+    await appts.update_status(a1.id, "cancelled")
+    await appts.create(client_id=client.id, starts_at=_utc(2026, 5, 9, 16))
+
+    result = await appts.list_upcoming(now=_utc(2026, 5, 7, 0), limit=10)
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
 async def test_delete_client_cascades_to_appointments(session: AsyncSession) -> None:
     """Deleting a Client must cascade-delete their Appointments (FK ON DELETE
     CASCADE in the schema). Verifies the policy the UX relies on:

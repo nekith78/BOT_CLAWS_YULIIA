@@ -43,6 +43,27 @@ class ClientRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars())
 
+    async def find_by_name_ci(self, name: str) -> Client | None:
+        """Case-insensitive EXACT-match lookup. Returns the first hit or None.
+        Used by the smart-fallback name resolver after morphology denormalisation
+        produces candidate nominatives — we ask the DB «is there a client called
+        exactly this?» before falling back to Levenshtein."""
+        target = name.lower()
+        stmt = select(Client)
+        result = await self._session.execute(stmt)
+        for client in result.scalars():
+            if client.name.lower() == target:
+                return client
+        return None
+
+    async def list_all(self) -> list[Client]:
+        """Return every client. Used by the smart-fallback Levenshtein fallback
+        when no denormalised form matches exactly. Client lists in this bot are
+        small (single-master use case) — full scan is fine."""
+        stmt = select(Client).order_by(Client.name)
+        result = await self._session.execute(stmt)
+        return list(result.scalars())
+
     async def update(
         self,
         client_id: int,
