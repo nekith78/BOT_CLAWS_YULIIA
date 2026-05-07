@@ -66,6 +66,9 @@ from src.services.intent.text_normalizer import (
 from src.services.intent.text_normalizer import (
     extract as sb_extract,
 )
+from src.services.intent.text_normalizer import (
+    resolve_client_candidate as sb_resolve_client_candidate,
+)
 from src.services.intent.types import (
     Action,
     ActionContext,
@@ -1086,6 +1089,34 @@ async def on_smart_brain_time_part(
     await callback.answer()
 
 
+async def _merge_text_answer_into_entities(
+    *,
+    fsm: dict[str, Any],
+    raw: str,
+    factory: async_sessionmaker[Any],
+) -> dict[str, Any]:
+    """Take the user's text/voice answer and merge it into sb_entities.
+
+    For `field == "name"` (new-client text input), denormalise via
+    `resolve_client_candidate` so the canonical sentence carries a
+    nominative form regardless of what the user typed/said. Match against
+    the DB too — the user might have typed an existing name as a "new"
+    client by accident; we silently link to that client_id."""
+    field = fsm.get("sb_field_being_asked") or "note_text"
+    entities = dict(fsm.get("sb_entities") or {})
+    if field == "name":
+        async with session_scope(factory) as session:
+            name, cid = await sb_resolve_client_candidate(
+                raw, ClientRepository(session)
+            )
+        entities["name"] = name
+        if cid is not None:
+            entities["client_id"] = cid
+    else:
+        entities[field] = raw
+    return entities
+
+
 @router.message(IntakePending.smart_brain_text, F.text)
 async def on_smart_brain_text(
     message: Message, state: FSMContext, bot: Bot, **data: Any
@@ -1096,9 +1127,10 @@ async def on_smart_brain_text(
     if not text:
         return
     fsm = await state.get_data()
-    field = fsm.get("sb_field_being_asked") or "note_text"
-    entities = dict(fsm.get("sb_entities") or {})
-    entities[field] = text
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    entities = await _merge_text_answer_into_entities(
+        fsm=fsm, raw=text, factory=factory
+    )
     await state.update_data(sb_entities=entities)
     chat_id = message.chat.id
     msg_id = int(fsm.get("sb_msg_id") or 0)
@@ -1133,9 +1165,10 @@ async def on_smart_brain_voice(
         await bot.send_message(message.chat.id, "Не услышал ничего, попробуй ещё раз.")
         return
     fsm = await state.get_data()
-    field = fsm.get("sb_field_being_asked") or "note_text"
-    entities = dict(fsm.get("sb_entities") or {})
-    entities[field] = transcript
+    factory = cast(async_sessionmaker[Any], data["session_factory"])
+    entities = await _merge_text_answer_into_entities(
+        fsm=fsm, raw=transcript, factory=factory
+    )
     await state.update_data(sb_entities=entities)
     chat_id = message.chat.id
     msg_id = int(fsm.get("sb_msg_id") or 0)

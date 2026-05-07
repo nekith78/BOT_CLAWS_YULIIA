@@ -562,6 +562,12 @@ async def test_create_appointment_after_choice_existing_lists_clients(
     assert result.question.editor == "client_picker"
     assert result.question.options is not None
     assert {opt.label for opt in result.question.options} >= {"Ира", "Маша"}
+    # Trailing «➕ Новый клиент» escape hatch — if user's intended client
+    # isn't in the list, they can still switch to text-input without
+    # cancelling. The option flips client_choice to "new".
+    last = result.question.options[-1]
+    assert "Новый" in last.label
+    assert last.value == {"client_choice": "new"}
 
 
 async def test_create_appointment_after_choice_new_asks_for_name(

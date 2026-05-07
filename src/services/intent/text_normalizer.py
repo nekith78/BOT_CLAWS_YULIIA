@@ -847,6 +847,16 @@ async def _build_question(
                 prompt="В базе пока нет клиентов. Имя нового клиента:",
                 editor="text_input",
             )
+        # Trailing escape hatch — if the right client isn't in the list, the
+        # user can still switch to «новый клиент» without cancelling and
+        # retyping the command. The pick flips client_choice to "new", which
+        # re-routes the next decide_next iteration to the text-input editor.
+        options.append(
+            ClarifyOption(
+                label="➕ Новый клиент",
+                value={"client_choice": "new"},
+            )
+        )
         return ClarifyQuestion(
             field="client",
             prompt="Какой клиент?",
