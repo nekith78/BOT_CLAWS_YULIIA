@@ -57,6 +57,12 @@ def test_prompt_includes_few_shot_examples_block() -> None:
         "cancel_appointment",
         "edit_note",
         "delete_client",
+        "count_clients",
+        "count_appointments",
+        "count_client_appointments",
+        "bulk_cancel_by_date",
+        "bulk_cancel_by_client",
+        "bulk_delete_clients",
     ):
         assert tool in prompt, f"missing example for {tool}"
     # Chit-chat negative example present.

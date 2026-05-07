@@ -87,6 +87,12 @@ def build_system_prompt(
 • «отмени запись Иры» → cancel_appointment(client_name="Ира")
 • «добавь к записи Иры заметку френч» → edit_note(client_name="Ира", note="френч")
 • «удали Иру» → delete_client(client_name="Ира")
+• «сколько у меня клиентов» → count_clients()
+• «сколько записей на сегодня» → count_appointments(period="today")
+• «сколько записей у Иры» → count_client_appointments(client_name="Ира")
+• «отмени все записи на завтра» → bulk_cancel_by_date(date=<today+1>)
+• «отмени все записи Иры» → bulk_cancel_by_client(client_name="Ира")
+• «удали всех клиентов», «очисти базу», «сотри всё» → bulk_delete_clients()
 • «привет», «спасибо», «как дела» → НЕ вызывай никакую tool
 """
     if recent_turns:
