@@ -23,6 +23,7 @@ from typing import Any, cast
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -129,7 +130,10 @@ def _ensure_registry() -> Any:
 # ---------- entry: voice -----------------------------------------------------
 
 
-@router.message(F.voice)
+@router.message(
+    F.voice,
+    ~StateFilter(IntakePending.editing_field_text),
+)
 async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
     if message.voice is None or message.from_user is None:
         return
@@ -188,7 +192,8 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
 @router.message(
     F.text
     & ~F.text.startswith("/")
-    & ~F.text.in_(_RESERVED_TEXT_BUTTONS)
+    & ~F.text.in_(_RESERVED_TEXT_BUTTONS),
+    ~StateFilter(IntakePending.editing_field_text),
 )
 async def on_text(message: Message, state: FSMContext, bot: Bot, **data: Any) -> None:
     if message.text is None:
