@@ -275,9 +275,30 @@ fields) as an argument.
 - **Mypy strict** — `poetry run mypy src` должен быть clean.
 - **Архитектура** — слои `bot/` (presentation, aiogram), `services/`
   (доменная логика, ничего про aiogram), `storage/` (SQLAlchemy + repos +
-  alembic). Repository-pattern над моделями. Бот — single-user, whitelist
-  по `OWNER_CHAT_ID` через `WhitelistMiddleware`.
+  alembic). Repository-pattern над моделями. Whitelist через
+  `WhitelistMiddleware` принимает множество chat ID — `OWNER_CHAT_ID`
+  (мастер) + `ADMIN_CHAT_IDS` (доп. админы, например разработчик).
 - **Полная спецификация** — на машине пользователя в
   `~/.claude/plans/swirling-whistling-tulip.md`. Подробные планы реализации
-  лежат в `docs/superpowers/plans/` (Foundation готов; впереди Booking core,
-  Notifications, Voice intake, Deploy и др.).
+  лежат в `docs/superpowers/plans/`.
+
+## Состояние проекта (актуальное)
+
+Все 7 фаз спецификации закрыты, бот в продакшене. История по веткам:
+
+| Фаза | План | Статус |
+|---|---|---|
+| 1 | Foundation — скелет, репозитории, миграции, тесты | ✅ done |
+| 2 | Booking core — FSM-мастер, CRUD записей, конфликт-чек | ✅ done |
+| 3 | Notifications — APScheduler, recovery, /settings | ✅ done |
+| 4 | Voice intake — STT + LLM + Action registry | ✅ done |
+| 5 | Voice intake edit + accuracy — per-field редактор + few-shot | ✅ done |
+| 6 | Smart fallback — Layer A action tolerance + второй мозг | ✅ done |
+| 7 | Deploy — Oracle Cloud, Docker, systemd, бэкапы | ✅ done |
+
+**Production:** Oracle Cloud E2.1.Micro VM (`134.98.142.61`), Ubuntu 20.04
+Minimal, docker compose stack под systemd, weekly backup в Telegram.
+Подробности и операционные команды — в auto-memory `project_deploy.md`.
+
+**Дальнейшая работа** — только по запросу пользователя (новые фичи,
+UX-доработки, баги от мастера в реальной эксплуатации).
