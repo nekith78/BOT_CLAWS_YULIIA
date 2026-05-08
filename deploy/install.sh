@@ -34,7 +34,18 @@ fi
 # Determine the user that invoked sudo (we add THEM to docker group, install
 # THEIR crontab, and own the repo as them — not as root).
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo ubuntu)}"
-REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
+# Resolve the user's home directory. Try a few methods in order of how likely
+# the underlying tool is to be available on a minimal Ubuntu image.
+if [ -d "/home/$REAL_USER" ]; then
+    REAL_HOME="/home/$REAL_USER"
+elif command -v getent > /dev/null 2>&1; then
+    REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+elif [ -f /etc/passwd ]; then
+    REAL_HOME=$(awk -F: -v u="$REAL_USER" '$1==u {print $6}' /etc/passwd)
+else
+    REAL_HOME=$(eval echo "~$REAL_USER")
+fi
 
 if [ -z "$REAL_HOME" ] || [ ! -d "$REAL_HOME" ]; then
     err "Can't resolve home directory for user '$REAL_USER'."
