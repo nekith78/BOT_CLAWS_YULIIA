@@ -1,0 +1,39 @@
+# Runtime volumes — owned by root inside containers, fail to read during build.
+data/
+redis-data/
+
+# Python build/test artifacts.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Tests don't ship to prod.
+tests/
+
+# Local secrets — never bake into the image.
+.env
+
+# IDE / OS junk.
+.idea/
+.vscode/
+.DS_Store
+
+# Git + repo housekeeping.
+.git/
+.gitignore
+.gitattributes
+
+# graphify and other generated artifacts.
+graphify-out/
+docs/
+
+# Logs.
+*.log
