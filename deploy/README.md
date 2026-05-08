@@ -6,24 +6,49 @@ auto-start + cron-driven daily backup to Telegram.
 
 ## Files
 
+- `install.sh` — one-shot bootstrap installer. Run with `sudo` on a fresh
+  VM. Does everything: apt update, Docker install, swap, repo clone,
+  docker compose build/up, systemd unit, backup cron, timezone.
 - `bot-claws.service` — systemd unit. Brings up the docker compose stack
-  at boot via `docker compose up -d`. Place at `/etc/systemd/system/bot-claws.service`.
+  at boot via `docker compose up -d`. Installed by `install.sh`.
 - `backup.sh` — daily backup script. Snapshots SQLite via the `.backup`
   API (atomic), gzips, sends to Telegram via `sendDocument`, rotates the
-  14 newest. Runs from cron (see header of the file for the cron line).
+  14 newest. Cron-driven (entry installed by `install.sh`).
 
-## Install (on a fresh VM, after `git clone` to /opt/bot-claws)
+## One-shot deploy on a fresh VM
 
 ```bash
-# systemd unit
-sudo cp /opt/bot-claws/deploy/bot-claws.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bot-claws.service
+# === On your laptop ===
+# 1. Upload the .env (with BOT_TOKEN, OWNER_CHAT_ID, OPENAI_API_KEY, etc.)
+scp -i ~/.ssh/oracle_bot_claws ~/path/to/BOT_CLAWS_YULIIA/.env ubuntu@<VM_IP>:~/bot-claws.env
 
-# Backup cron (runs as the user that owns /opt/bot-claws — usually `ubuntu`)
-sudo touch /var/log/bot-claws-backup.log
-sudo chown $USER:$USER /var/log/bot-claws-backup.log
-( crontab -l 2>/dev/null; echo "0 3 * * * /opt/bot-claws/deploy/backup.sh >> /var/log/bot-claws-backup.log 2>&1" ) | crontab -
+# 2. SSH to the VM
+ssh -i ~/.ssh/oracle_bot_claws ubuntu@<VM_IP>
+
+# === On the VM ===
+# 3. Clone the repo and run the installer
+git clone https://github.com/nekith78/BOT_CLAWS_YULIIA.git /tmp/bot-claws-installer
+sudo bash /tmp/bot-claws-installer/deploy/install.sh
+```
+
+The installer takes 3-5 minutes. When done, `/start` in Telegram should
+work; the systemd unit + nightly backup cron are installed and active.
+
+## Manual install (if you don't want to run the script)
+
+See the full step-by-step in the original walkthrough below; it's the
+same commands the installer runs, just executed by hand:
+
+```bash
+# 1. apt + Docker (see official Docker docs for Ubuntu 22.04)
+# 2. usermod -aG docker $USER && newgrp docker
+# 3. fallocate /swapfile 2G && mkswap && swapon
+# 4. git clone https://github.com/nekith78/BOT_CLAWS_YULIIA.git /opt/bot-claws
+# 5. nano /opt/bot-claws/.env  (or scp from laptop)
+# 6. cd /opt/bot-claws && docker compose up -d --build
+# 7. sudo cp deploy/bot-claws.service /etc/systemd/system/
+#    sudo systemctl daemon-reload && sudo systemctl enable --now bot-claws.service
+# 8. (crontab -l; echo "0 3 * * * /opt/bot-claws/deploy/backup.sh >> /var/log/bot-claws-backup.log 2>&1") | crontab -
 ```
 
 ## Verifying
