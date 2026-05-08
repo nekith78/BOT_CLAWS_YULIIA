@@ -142,10 +142,20 @@ fi
 mkdir -p "$REPO_DIR/data" "$REPO_DIR/data/backups"
 chown -R "$REAL_USER:$REAL_USER" "$REPO_DIR/data"
 
+# Match container's `bot` UID/GID to the host user. On most distros the
+# default user sits at UID 1000, but Oracle Cloud Ubuntu uses 1001 — without
+# this the container can't write to the mounted ./data volume. We export the
+# build args so docker compose's interpolation (${BOT_UID}) picks them up.
+HOST_UID=$(id -u "$REAL_USER")
+HOST_GID=$(id -g "$REAL_USER")
+log "      UID/GID for in-container bot user: ${HOST_UID}:${HOST_GID}"
+export BOT_UID="$HOST_UID"
+export BOT_GID="$HOST_GID"
+
 # --- step 7: build + run --------------------------------------------------
 log "[7/8] building and starting docker compose stack (this takes 3-5 min)"
 cd "$REPO_DIR"
-docker compose up -d --build
+BOT_UID="$HOST_UID" BOT_GID="$HOST_GID" docker compose up -d --build
 
 # --- step 8: systemd + cron + tz -----------------------------------------
 log "[8/8] systemd unit + nightly backup cron"

@@ -40,7 +40,15 @@ COPY --from=builder /app/.venv /app/.venv
 COPY src/ ./src/
 COPY alembic.ini ./
 
-RUN useradd -m -u 1000 bot \
+# UID for the in-container `bot` user. Default 1000 matches a fresh Ubuntu /
+# Debian image. Some cloud images (e.g. Oracle's Ubuntu Cloud) put the default
+# user at UID 1001 — pass `--build-arg BOT_UID=1001` (or whatever `id -u`
+# returns on the host) so the container's bot user matches the host user that
+# owns the mounted ./data volume. install.sh does this automatically.
+ARG BOT_UID=1000
+ARG BOT_GID=1000
+RUN groupadd -g ${BOT_GID} bot \
+    && useradd -m -u ${BOT_UID} -g ${BOT_GID} bot \
     && mkdir -p /data \
     && chown -R bot:bot /app /data
 USER bot

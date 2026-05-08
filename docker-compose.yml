@@ -1,6 +1,14 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Default 1000 matches a fresh Ubuntu/Debian image. Override via env
+        # vars BOT_UID / BOT_GID when building on a host where the user owning
+        # the ./data volume has a non-1000 UID (e.g. Oracle Cloud Ubuntu uses
+        # 1001). install.sh sets BOT_UID=$(id -u "$REAL_USER") automatically.
+        BOT_UID: ${BOT_UID:-1000}
+        BOT_GID: ${BOT_GID:-1000}
     container_name: bot-claws
     restart: unless-stopped
     env_file: .env
