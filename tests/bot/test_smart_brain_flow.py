@@ -229,7 +229,11 @@ async def test_llm_first_misses_normalizer_asks_for_note_text(
 
     tz = ZoneInfo("Asia/Almaty")
     irene = await ClientRepository(session).create(name="Ира")
-    local = _datetime.combine(_date(2026, 5, 8), _time(14, 0), tzinfo=tz)
+    # Far-future date so `list_upcoming` (filtered by real wall-clock now())
+    # always sees this appointment as upcoming, regardless of when the test
+    # is run. The test is checking «single match → asks for note text», not
+    # date logic — any always-future date works.
+    local = _datetime.combine(_date(2099, 1, 1), _time(14, 0), tzinfo=tz)
     utc = local.astimezone(_tz.utc).replace(tzinfo=None)
     await AppointmentRepository(session).create(
         client_id=irene.id, starts_at=utc
