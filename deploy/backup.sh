@@ -37,22 +37,29 @@ TMP="$BACKUP_DIR/bot-${DATE}.db"
 gzip -f "$TMP"
 FINAL="${TMP}.gz"
 
-# ---- 2. Pick BOT_TOKEN and OWNER_CHAT_ID out of .env ---------------------
+# ---- 2. Pick BOT_TOKEN, OWNER_CHAT_ID, and optional BACKUP_CHAT_ID -------
 # We grep for specific keys instead of `source .env` so weird characters in
 # unrelated values can't break the script.
 BOT_TOKEN=$(grep -E '^BOT_TOKEN=' ./.env | cut -d= -f2- | tr -d '\r"')
 OWNER_CHAT_ID=$(grep -E '^OWNER_CHAT_ID=' ./.env | cut -d= -f2- | tr -d '\r"')
+# BACKUP_CHAT_ID is optional. If set (e.g. to a private channel id like
+# -1001234567890), backups go there instead of the main owner chat. Lets the
+# operator keep their main bot conversation clean of backup spam.
+BACKUP_CHAT_ID=$(grep -E '^BACKUP_CHAT_ID=' ./.env | cut -d= -f2- | tr -d '\r"' || true)
 
 if [ -z "${BOT_TOKEN:-}" ] || [ -z "${OWNER_CHAT_ID:-}" ]; then
     echo "[$(date)] [backup] missing BOT_TOKEN or OWNER_CHAT_ID in .env" >&2
     exit 1
 fi
 
-# ---- 3. Send the file to Telegram ---------------------------------------
+DEST_CHAT_ID="${BACKUP_CHAT_ID:-$OWNER_CHAT_ID}"
+
+# ---- 3. Send the file to Telegram (silent — no notification ping) -------
 HTTP_CODE=$(curl -s -o /tmp/tg-resp.json -w "%{http_code}" \
-  -F "chat_id=${OWNER_CHAT_ID}" \
+  -F "chat_id=${DEST_CHAT_ID}" \
   -F "document=@${FINAL}" \
   -F "caption=📦 Daily backup ${DATE}" \
+  -F "disable_notification=true" \
   "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument")
 
 if [ "$HTTP_CODE" != "200" ]; then
