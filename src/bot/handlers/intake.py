@@ -33,6 +33,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.bot.admin_alerts import notify_admins
 from src.bot.callback_data import (
     CalendarCD,
     ClientCD,
@@ -179,7 +180,14 @@ async def on_voice(message: Message, state: FSMContext, bot: Bot, **data: Any) -
     await bot.download_file(file.file_path, buf)
     audio = buf.getvalue()
 
-    transcript = await stt.transcribe(audio, mime="audio/ogg")
+    transcript = await _safe_transcribe(
+        stt=stt, audio=audio, bot=bot,
+        settings=settings, user_chat_id=chat_id,
+    )
+    if transcript is None:
+        # Helper already messaged the user and (if needed) alerted admins.
+        await _delete_status(bot, chat_id, status_msg_id)
+        return
     if not transcript.strip():
         await _replace_status(
             bot, chat_id, status_msg_id, "Не услышал ничего. Попробуй ещё раз."
@@ -253,6 +261,60 @@ async def on_text(message: Message, state: FSMContext, bot: Bot, **data: Any) ->
 
 
 # ---------- status-message helpers -------------------------------------------
+
+
+async def _safe_transcribe(
+    *,
+    stt: STTProvider,
+    audio: bytes,
+    bot: Bot,
+    settings: Any,
+    user_chat_id: int,
+) -> str | None:
+    """Run STT, catching API errors. On failure: shows the user a friendly
+    message about voice being unavailable, and — if the failure looks like
+    a billing/auth problem on our side — pings admin_chat_ids so the dev
+    can react. Returns the transcript on success, or None on any error
+    (caller should bail out of the handler).
+    """
+    try:
+        return await stt.transcribe(audio, mime="audio/ogg")
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        log.exception("STT transcribe failed")
+        msg_lower = str(exc).lower()
+        is_billing = any(
+            tok in msg_lower
+            for tok in (
+                "insufficient_quota",
+                "quota",
+                "billing",
+                "exceeded",
+                "invalid_api_key",
+                "incorrect api key",
+                "401",
+            )
+        )
+        if is_billing:
+            user_text = (
+                "🤖 Распознавание голоса временно недоступно — "
+                "лимит API исчерпан. Напиши текстом."
+            )
+            await notify_admins(
+                bot,
+                settings,
+                f"⚠️ STT сломался: лимит/ключ OpenAI Whisper.\n"
+                f"Подробности: {msg}\n"
+                f"Пополни/проверь ключ на platform.openai.com.\n"
+                f"Бот пока работает только на тексте.",
+            )
+        else:
+            user_text = (
+                "🤖 Не удалось распознать голос — попробуй ещё раз "
+                "или напиши текстом."
+            )
+        await bot.send_message(chat_id=user_chat_id, text=user_text)
+        return None
 
 
 async def _send_status(bot: Bot, chat_id: int, text: str) -> int:
@@ -1160,7 +1222,13 @@ async def on_smart_brain_voice(
         return
     buf = io.BytesIO()
     await bot.download_file(file.file_path, buf)
-    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    transcript_raw = await _safe_transcribe(
+        stt=stt, audio=buf.getvalue(), bot=bot,
+        settings=settings, user_chat_id=message.chat.id,
+    )
+    if transcript_raw is None:
+        return
+    transcript = transcript_raw.strip()
     if not transcript:
         await bot.send_message(message.chat.id, "Не услышал ничего, попробуй ещё раз.")
         return
@@ -2024,7 +2092,13 @@ async def on_edit_voice_input(
         return
     buf = io.BytesIO()
     await bot.download_file(file.file_path, buf)
-    transcript = (await stt.transcribe(buf.getvalue(), mime="audio/ogg")).strip()
+    transcript_raw = await _safe_transcribe(
+        stt=stt, audio=buf.getvalue(), bot=bot,
+        settings=settings, user_chat_id=message.chat.id,
+    )
+    if transcript_raw is None:
+        return
+    transcript = transcript_raw.strip()
     if not transcript:
         await bot.send_message(message.chat.id, "Не услышал ничего, попробуй ещё раз.")
         return
