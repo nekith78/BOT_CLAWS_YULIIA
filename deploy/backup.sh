@@ -37,14 +37,14 @@ TMP="$BACKUP_DIR/bot-${DATE}.db"
 gzip -f "$TMP"
 FINAL="${TMP}.gz"
 
-# ---- 2. Pick BOT_TOKEN, OWNER_CHAT_ID, and optional BACKUP_CHAT_ID -------
+# ---- 2. Pick relevant keys out of .env -----------------------------------
 # We grep for specific keys instead of `source .env` so weird characters in
 # unrelated values can't break the script.
 BOT_TOKEN=$(grep -E '^BOT_TOKEN=' ./.env | cut -d= -f2- | tr -d '\r"')
 OWNER_CHAT_ID=$(grep -E '^OWNER_CHAT_ID=' ./.env | cut -d= -f2- | tr -d '\r"')
-# BACKUP_CHAT_ID is optional. If set (e.g. to a private channel id like
-# -1001234567890), backups go there instead of the main owner chat. Lets the
-# operator keep their main bot conversation clean of backup spam.
+ADMIN_CHAT_IDS=$(grep -E '^ADMIN_CHAT_IDS=' ./.env | cut -d= -f2- | tr -d '\r"' || true)
+# Optional override. If set (e.g. id of a dedicated private channel), all
+# backups go there and per-admin fan-out is skipped.
 BACKUP_CHAT_ID=$(grep -E '^BACKUP_CHAT_ID=' ./.env | cut -d= -f2- | tr -d '\r"' || true)
 
 if [ -z "${BOT_TOKEN:-}" ] || [ -z "${OWNER_CHAT_ID:-}" ]; then
@@ -52,19 +52,40 @@ if [ -z "${BOT_TOKEN:-}" ] || [ -z "${OWNER_CHAT_ID:-}" ]; then
     exit 1
 fi
 
-DEST_CHAT_ID="${BACKUP_CHAT_ID:-$OWNER_CHAT_ID}"
+# Build the destination list (in priority order):
+#   1. BACKUP_CHAT_ID — single explicit override (e.g. a private channel).
+#   2. ADMIN_CHAT_IDS — comma-separated list; backup goes to every admin so
+#      the developer who maintains the deploy gets their copy. The master
+#      (OWNER_CHAT_ID) deliberately does NOT receive backups in this mode —
+#      they shouldn't be bothered with operational files. Add their id to
+#      ADMIN_CHAT_IDS too if they should receive backups.
+#   3. OWNER_CHAT_ID — fallback for single-user deployments.
+DEST_LIST=""
+if [ -n "${BACKUP_CHAT_ID:-}" ]; then
+    DEST_LIST="$BACKUP_CHAT_ID"
+elif [ -n "${ADMIN_CHAT_IDS:-}" ]; then
+    DEST_LIST=$(echo "$ADMIN_CHAT_IDS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | tr '\n' ' ')
+else
+    DEST_LIST="$OWNER_CHAT_ID"
+fi
 
-# ---- 3. Send the file to Telegram (silent — no notification ping) -------
-HTTP_CODE=$(curl -s -o /tmp/tg-resp.json -w "%{http_code}" \
-  -F "chat_id=${DEST_CHAT_ID}" \
-  -F "document=@${FINAL}" \
-  -F "caption=📦 Weekly backup ${DATE}" \
-  -F "disable_notification=true" \
-  "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument")
+# ---- 3. Send the file to each destination (silent — no notification ping) ----
+ANY_FAILED=0
+for DEST_CHAT_ID in $DEST_LIST; do
+    HTTP_CODE=$(curl -s -o /tmp/tg-resp.json -w "%{http_code}" \
+      -F "chat_id=${DEST_CHAT_ID}" \
+      -F "document=@${FINAL}" \
+      -F "caption=📦 Weekly backup ${DATE}" \
+      -F "disable_notification=true" \
+      "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument")
+    if [ "$HTTP_CODE" != "200" ]; then
+        echo "[$(date)] [backup] Telegram upload to chat ${DEST_CHAT_ID} FAILED (HTTP $HTTP_CODE)" >&2
+        cat /tmp/tg-resp.json >&2
+        ANY_FAILED=1
+    fi
+done
 
-if [ "$HTTP_CODE" != "200" ]; then
-    echo "[$(date)] [backup] Telegram upload FAILED (HTTP $HTTP_CODE)" >&2
-    cat /tmp/tg-resp.json >&2
+if [ "$ANY_FAILED" = "1" ]; then
     exit 1
 fi
 
