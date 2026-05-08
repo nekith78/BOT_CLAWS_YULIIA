@@ -166,17 +166,27 @@ systemctl enable --now bot-claws.service
 touch /var/log/bot-claws-backup.log
 chown "$REAL_USER:$REAL_USER" /var/log/bot-claws-backup.log
 
-# Idempotent cron entry: only add if not already there.
+# Idempotent cron entry: only add if not already there. Schedule is weekly
+# (every Sunday at 03:00) — single-user bot's data doesn't change often
+# enough to justify daily backups; weekly + 14-snapshot rotation gives
+# ~3 months of history.
 CRON_TAG="$REPO_DIR/deploy/backup.sh"
+CRON_LINE="0 3 * * 0 $CRON_TAG >> /var/log/bot-claws-backup.log 2>&1"
 EXISTING_CRON=$(sudo -u "$REAL_USER" crontab -l 2>/dev/null || true)
 if ! echo "$EXISTING_CRON" | grep -qF "$CRON_TAG"; then
-    log "      adding cron entry: 03:00 daily Telegram backup"
+    log "      adding cron entry: weekly (Sunday 03:00) Telegram backup"
     {
         if [ -n "$EXISTING_CRON" ]; then echo "$EXISTING_CRON"; fi
-        echo "0 3 * * * $REPO_DIR/deploy/backup.sh >> /var/log/bot-claws-backup.log 2>&1"
+        echo "$CRON_LINE"
     } | sudo -u "$REAL_USER" crontab -
 else
-    log "      cron entry already present"
+    # Already present — replace to update from old daily schedule, if any.
+    NEW_CRON=$(echo "$EXISTING_CRON" | grep -vF "$CRON_TAG")
+    {
+        if [ -n "$NEW_CRON" ]; then echo "$NEW_CRON"; fi
+        echo "$CRON_LINE"
+    } | sudo -u "$REAL_USER" crontab -
+    log "      cron entry refreshed (now weekly)"
 fi
 
 # Set TZ so cron's 03:00 matches the user's local clock (Asia/Almaty per spec).

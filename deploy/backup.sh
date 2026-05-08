@@ -1,8 +1,8 @@
 #!/bin/bash
-# Daily backup script for bot-claws-yuliia.
+# Weekly backup script for bot-claws-yuliia.
 #
-# Cron entry (every day at 03:00 server-time):
-#   0 3 * * * /opt/bot-claws/deploy/backup.sh >> /var/log/bot-claws-backup.log 2>&1
+# Cron entry (every Sunday at 03:00 server-time):
+#   0 3 * * 0 /opt/bot-claws/deploy/backup.sh >> /var/log/bot-claws-backup.log 2>&1
 #
 # What it does:
 #   1. Atomic SQLite snapshot via the `.backup` API (runs inside the bot
@@ -58,7 +58,7 @@ DEST_CHAT_ID="${BACKUP_CHAT_ID:-$OWNER_CHAT_ID}"
 HTTP_CODE=$(curl -s -o /tmp/tg-resp.json -w "%{http_code}" \
   -F "chat_id=${DEST_CHAT_ID}" \
   -F "document=@${FINAL}" \
-  -F "caption=📦 Daily backup ${DATE}" \
+  -F "caption=📦 Weekly backup ${DATE}" \
   -F "disable_notification=true" \
   "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument")
 

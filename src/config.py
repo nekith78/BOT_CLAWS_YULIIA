@@ -24,7 +24,13 @@ class Settings(BaseSettings):
 
     # --- Telegram ----------------------------------------------------------
     bot_token: SecretStr
+    # Primary user (the master who actually uses the bot day-to-day).
+    # Notifications, reminders, /start menu — all addressed here.
     owner_chat_id: int
+    # Optional additional admins (e.g. the developer who maintains the
+    # deploy). Comma-separated chat IDs. They get whitelist access (can
+    # talk to the bot), but notifications still go only to owner_chat_id.
+    admin_chat_ids: str = ""
     owner_tz: str = "Asia/Almaty"
 
     # --- STT provider ------------------------------------------------------
@@ -63,6 +69,22 @@ class Settings(BaseSettings):
     @property
     def db_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.db_path}"
+
+    @property
+    def whitelist_chat_ids(self) -> set[int]:
+        """Set of all chat IDs that may use the bot — owner + extra admins.
+        WhitelistMiddleware accepts updates from any of them."""
+        ids: set[int] = {self.owner_chat_id}
+        for raw in (self.admin_chat_ids or "").split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                ids.add(int(raw))
+            except ValueError:
+                # Silently skip garbage — startup is not the place to crash.
+                continue
+        return ids
 
     @model_validator(mode="after")
     def _validate_provider_keys(self) -> Settings:

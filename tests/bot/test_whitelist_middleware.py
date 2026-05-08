@@ -57,3 +57,42 @@ async def test_update_without_user_is_dropped() -> None:
 
     handler.assert_not_awaited()
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_multiple_allowed_chat_ids() -> None:
+    """Plan #7 — set-based init lets the bot have multiple admins
+    (e.g. master + developer)."""
+    handler = AsyncMock(return_value="ok")
+    mw = WhitelistMiddleware(allowed_chat_ids={42, 999})
+
+    # Both admins pass through.
+    assert await mw(handler, _make_message(user_id=42), {}) == "ok"
+    assert await mw(handler, _make_message(user_id=999), {}) == "ok"
+    # Random outsider still dropped.
+    assert await mw(handler, _make_message(user_id=12345), {}) is None
+    assert handler.await_count == 2
+
+
+def test_whitelist_chat_ids_property_parses_admin_list() -> None:
+    """Settings.whitelist_chat_ids merges owner + comma-separated admins."""
+    from src.config import Settings
+
+    s = Settings(
+        bot_token="x",  # type: ignore[arg-type]
+        owner_chat_id=100,
+        admin_chat_ids="200, 300, garbage, 400",
+        openrouter_api_key="x",  # type: ignore[arg-type]
+    )
+    assert s.whitelist_chat_ids == {100, 200, 300, 400}
+
+
+def test_whitelist_chat_ids_when_no_admins() -> None:
+    from src.config import Settings
+
+    s = Settings(
+        bot_token="x",  # type: ignore[arg-type]
+        owner_chat_id=100,
+        openrouter_api_key="x",  # type: ignore[arg-type]
+    )
+    assert s.whitelist_chat_ids == {100}

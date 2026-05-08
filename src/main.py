@@ -113,7 +113,9 @@ def _build_dispatcher(
     dp["llm"] = llm
 
     # Whitelist must run before any router so unauthorised updates never reach handlers.
-    dp.update.outer_middleware(WhitelistMiddleware(owner_chat_id=settings.owner_chat_id))
+    dp.update.outer_middleware(
+        WhitelistMiddleware(allowed_chat_ids=settings.whitelist_chat_ids)
+    )
     # Drop double-tap clicks on the same message id.
     dp.callback_query.middleware(ConcurrencyMiddleware())
 
